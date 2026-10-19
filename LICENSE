@@ -1,0 +1,97 @@
+ClipForge Use-Only License
+Version 1.0
+
+Copyright (c) 2026 r4yan2wavy. All rights reserved to the extent applicable.
+
+Licensor: r4yan2wavy
+Official repository: https://github.com/r4yan2wavy/ClipForge
+
+This is a custom proprietary license. It is not an open-source license.
+
+1. Scope
+
+"Software" means the ClipForge source code, documentation, prompts, examples and
+other material supplied in this repository, but excludes third-party components
+and user-supplied or generated content. This license grants only rights that the
+Licensor owns or is authorized to license. It does not create rights in material
+that is not protected by applicable law.
+
+2. Permission to use
+
+Subject to these terms, the Licensor grants you a worldwide, nonexclusive,
+royalty-free, nontransferable permission to download, install and run an
+unmodified copy of the Software for your own personal or business purposes.
+You may make the local copies reasonably necessary for installation, execution
+and backup. Keep this license and any existing notices with those copies.
+
+You may use the Software to create and publish videos, including monetized
+videos, subject to the rights and platform rules applicable to your content.
+This license does not impose a fee or an ownership claim on your content or
+outputs. It does not grant rights to source media, music, trademarks or other
+third-party material.
+
+3. Normal configuration
+
+You may set documented configuration values and environment variables, supply
+your own media and input files, and edit your generated output and operational
+data. You may copy and fill in the supplied configuration, manifest and scheduler
+examples, including changing paths, account identifiers, credentials and
+settings, solely to configure your own installation as documented.
+
+These configuration permissions do not permit changes to program logic,
+selection or metadata prompt templates, or other Software source code.
+
+4. Restrictions
+
+Except for the permissions expressly granted above, the exceptions below, or
+the Licensor's separate written permission, you may not:
+
+(a) modify, adapt, translate or create derivative versions of the Software;
+(b) distribute, republish, mirror, sublicense, sell, rent or transfer the Software
+    or copies of it, whether modified or unmodified;
+(c) incorporate or distribute the Software as part of another software product;
+(d) remove or alter copyright, license or other ownership notices; or
+(e) present the Software as your own work or claim the Licensor endorses you.
+
+You may direct others to the official repository to obtain their own copy.
+No other copyright, patent, trademark or other intellectual-property rights are
+granted by implication. Rights not expressly granted are reserved.
+
+5. Platform, legal and third-party exceptions
+
+Nothing in this license limits rights that cannot lawfully be restricted under
+applicable law. Nothing in it limits rights already granted to GitHub or its
+users under the applicable GitHub Terms of Service, including viewing and
+forking a public repository through GitHub as those terms permit. Those platform
+rights do not create a general permission from the Licensor to modify or
+redistribute the Software beyond the rights actually granted by those terms.
+
+Third-party software, dependencies, model weights, fonts, services and content
+remain subject to their own licenses and terms. This license does not replace,
+restrict or relicense those separate rights. See THIRD_PARTY_NOTICES.md.
+
+6. Termination
+
+The permissions granted by this license terminate if you materially violate
+its terms. Following termination you must stop using the Software and delete
+copies you hold, except copies or rights you may retain under applicable law,
+GitHub's applicable terms or a separate valid license.
+
+7. No warranty
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS PROVIDED
+"AS IS" AND "AS AVAILABLE", WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE
+AND NON-INFRINGEMENT. NO GUARANTEE IS MADE ABOUT ACCURACY, AVAILABILITY,
+SECURITY, RESULTS, COPYRIGHT CLEARANCE OR PLATFORM ACCEPTANCE.
+
+8. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSOR IS NOT LIABLE FOR
+CLAIMS, DAMAGES OR OTHER LIABILITY ARISING FROM OR RELATED TO THE SOFTWARE OR
+ITS USE, WHETHER IN CONTRACT, TORT OR OTHERWISE. THIS EXCLUSION DOES NOT APPLY
+TO LIABILITY THAT CANNOT LAWFULLY BE EXCLUDED OR LIMITED.
+
+For permission beyond this license, contact r4yan2wavy through the official
+GitHub repository. Changes to these terms require the Licensor's authorization.
+
