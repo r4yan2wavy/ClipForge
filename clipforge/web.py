@@ -231,8 +231,9 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             self._json(self.service.register_source(data["path"]), 201)
         elif path == "/api/links":
             self._json(self.service.import_link(data), 202)
-        elif match := re.fullmatch(rf"/api/links/({ENTITY})/(attach|retry)", path):
-            result = self.service.attach_link(match[1], data) if match[2] == "attach" else self.service.retry_link(match[1], data)
+        elif match := re.fullmatch(rf"/api/links/({ENTITY})/(attach|retry|delete)", path):
+            action = {"attach": self.service.attach_link, "retry": self.service.retry_link, "delete": self.service.delete_link}[match[2]]
+            result = action(match[1], data)
             self._json(result, 202 if match[2] == "retry" else 200)
         elif match := re.fullmatch(rf"/api/clips/({ENTITY})/social/(instagram|tiktok)/(publish|refresh|finish)", path):
             self._json(self.service.social_action(match[1], match[2], match[3], data), 202)

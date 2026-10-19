@@ -28,6 +28,7 @@ const icons = {
   scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8 8 12 12M8 16 20 4"/>',
   crosshair: '<circle cx="12" cy="12" r="7"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/>',
   download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
+  trash: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   alert: '<path d="M10.4 4 2 19h20L13.6 4a1.8 1.8 0 0 0-3.2 0ZM12 9v4M12 16v.3"/>',
   spinner: '<path d="M21 12a9 9 0 1 1-9-9"/>',
@@ -162,7 +163,7 @@ function renderLinks() {
     const url = externalUrl(link.url);
     const ready = link.state === "ready" && state.sources.some((source) => source.id === link.source_id);
     const importing = link.state === "importing";
-    return `<article class="link-card"><span class="link-platform-icon">${icon(icons[link.platform] ? link.platform : "link")}</span><div class="link-card-main"><div class="link-card-title"><strong>${esc(platformName(link.platform))}</strong><span class="badge${ready ? " green" : importing ? " blue" : ""}">${ready ? "Video attached" : importing ? "Importing" : link.state === "failed" ? "Import needs attention" : "Video file needed"}</span></div><p class="link-url">${esc(link.url)}</p><p class="link-message">${esc(link.message || (ready ? "Your video is ready to clip." : "Attach an authorized local video file to use this source."))}</p><div class="link-card-actions">${url ? `<a class="text-button" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open original ↗</a>` : ""}${ready ? `<button class="text-button" type="button" data-create="${esc(link.source_id)}">Create clip ↗</button>` : !importing ? `<button class="button subtle small" type="button" data-attach="${esc(link.id)}">${icon("folder")} Attach a video</button>` : ""}${link.state === "failed" && link.can_download ? `<button class="text-button" type="button" data-link-retry="${esc(link.id)}">Retry import</button>` : ""}</div></div></article>`;
+    return `<article class="link-card"><span class="link-platform-icon">${icon(icons[link.platform] ? link.platform : "link")}</span><div class="link-card-main"><div class="link-card-title"><strong>${esc(platformName(link.platform))}</strong><span class="badge${ready ? " green" : importing ? " blue" : ""}">${ready ? "Video attached" : importing ? "Importing" : link.state === "failed" ? "Import needs attention" : "Video file needed"}</span></div><p class="link-url">${esc(link.url)}</p><p class="link-message">${esc(link.message || (ready ? "Your video is ready to clip." : "Attach an authorized local video file to use this source."))}</p><div class="link-card-actions">${url ? `<a class="text-button" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open original ↗</a>` : ""}${ready ? `<button class="text-button" type="button" data-create="${esc(link.source_id)}">Create clip ↗</button>` : !importing ? `<button class="button subtle small" type="button" data-attach="${esc(link.id)}">${icon("folder")} Attach a video</button>` : ""}${link.state === "failed" && link.can_download ? `<button class="text-button" type="button" data-link-retry="${esc(link.id)}">Retry import</button>` : ""}<button class="text-button danger-text link-delete" type="button" data-link-delete="${esc(link.id)}" aria-label="Delete saved link: ${esc(link.url)}" title="${importing ? "Wait for the import to finish" : "Delete this saved link"}"${importing ? " disabled" : ""}>${icon("trash")} Delete</button></div></div></article>`;
   }).join("");
 }
 
@@ -624,6 +625,17 @@ function bindEvents() {
     const create = event.target.closest("[data-create]");
     const attach = event.target.closest("[data-attach]");
     const retry = event.target.closest("[data-link-retry]");
+    const remove = event.target.closest("[data-link-delete]");
+    if (remove) {
+      const linkId = remove.dataset.linkDelete;
+      const link = state.links.find((item) => item.id === linkId);
+      if (!link || link.state === "importing") return;
+      $("#delete-link-form").elements.link_id.value = linkId;
+      $("#delete-link-url").textContent = link.url;
+      clearError("#delete-link-error");
+      $("#delete-link-dialog").showModal();
+      return;
+    }
     if (create) openCreate(create.dataset.create);
     if (attach) openAttach(attach.dataset.attach);
     if (retry) {
@@ -632,6 +644,21 @@ function bindEvents() {
       catch (error) { toast(error.message, true); }
       finally { restore(); }
     }
+  });
+  $("#delete-link-cancel").addEventListener("click", () => $("#delete-link-dialog").close());
+  $("#delete-link-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const linkId = event.currentTarget.elements.link_id.value;
+    clearError("#delete-link-error");
+    const restore = startAction($("#delete-link-submit"), "Deleting…");
+    try {
+      await api(`/api/links/${encodeURIComponent(linkId)}/delete`, {confirmed: true});
+      if (state.attachLinkId === linkId) { state.attachLinkId = null; state.attachPendingUpload = false; if ($("#attach-dialog").open) $("#attach-dialog").close(); }
+      $("#delete-link-dialog").close();
+      await refreshLibrary();
+      toast("Saved link deleted.");
+    } catch (error) { showError("#delete-link-error", error); }
+    finally { restore(); }
   });
   $("#attach-form").addEventListener("submit", async (event) => {
     event.preventDefault();

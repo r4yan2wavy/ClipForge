@@ -19,6 +19,8 @@ This feature does not extract video streams from arbitrary platform pages. It do
 
 A reference alone has no editable media, generated preview or completed clip. Attaching a file associates the supplied recording with the reference; it does not verify that the recording matches the linked post or that your usage rights are valid. **Open original** opens the external website in your browser, which makes a separate connection to that website.
 
+To organize **Linked videos**, choose **Delete** on a card and confirm. This removes only that saved link; source videos, files, clips and their credits remain available. Wait for an active link import to finish before deleting its card.
+
 ## Direct video files
 
 Use a direct file link provided by you or the media owner. It must use HTTPS, have a supported video extension in its URL path (for example `.mp4`, `.mov` or `.webm`), and lead to supported video bytes. A webpage, streaming playlist or a share page that requires interactive login is not a direct video file. For private content, downloading the authorized original yourself and uploading/importing it locally is the supported path.

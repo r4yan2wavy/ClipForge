@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clipforge-local"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local browser video studio with authorized link imports and optional social publishing"
 license = {file = "LICENSE"}
 classifiers = ["License :: Other/Proprietary License"]

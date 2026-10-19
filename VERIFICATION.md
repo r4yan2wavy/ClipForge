@@ -1,5 +1,17 @@
 # Validation record
 
+## Linked video organization, version 0.3.1
+
+All **20 local studio service/HTTP tests** passed, including deletion consent,
+app-token protection, unknown link IDs, removal of only the selected duplicate,
+restart persistence, and preservation of original files, source credits and
+prepared clip artifacts. Active imports cannot be deleted, including the brief
+period after their source is attached. Worker lock failures mark imports failed
+so their cards can be deleted or retried. JavaScript syntax validation passed.
+Browser inspection confirmed a Delete button on each of two saved references,
+an in-app confirmation with Cancel focused first, and that Cancel preserves both
+references. The browser console had no errors.
+
 ## Link imports and social publishing, version 0.3.0
 
 The combined offline suite passed **169 tests and 57 subtests** in 18.14 seconds

@@ -270,6 +270,11 @@ class StudioTest(unittest.TestCase):
             status, _, body = request("POST", f"/api/links/{link['id']}/attach", json.dumps({"source_id": source["id"]}), **auth)
             self.assertEqual(status, 200)
             self.assertEqual(json.loads(body)["link"]["state"], "ready")
+            self.assertEqual(request("POST", f"/api/links/{link['id']}/delete", '{"confirmed":true}', **{"Content-Type": "application/json"})[0], 403)
+            self.assertEqual(request("POST", f"/api/links/{link['id']}/delete", '{"confirmed":false}', **auth)[0], 400)
+            self.assertEqual(request("POST", f"/api/links/{link['id']}/delete", '{"confirmed":true}', **auth)[0], 200)
+            self.assertEqual(request("GET", source["url"])[0], 200)
+            self.assertEqual(request("POST", f"/api/links/{link['id']}/delete", '{"confirmed":true}', **auth)[0], 404)
             self.assertEqual(request("GET", "/guide/links")[0], 200)
             self.assertEqual(request("GET", "/guide/social")[0], 200)
             self.assertEqual(request("GET", "/api/social/instagram/creator")[0], 409)
@@ -388,6 +393,58 @@ class StudioTest(unittest.TestCase):
             self.service._youtube_task(db, {"id": "cross-post", "kind": "publish", "payload": payload})
             self.assertEqual(upload.call_args.kwargs["publication_options"]["made_for_kids"], False)
         self.assertEqual((folder / "artifact.json").read_bytes(), before)
+
+    def test_delete_saved_link_preserves_files_clips_provenance_and_other_links(self):
+        clip = self.render_fixture()
+        source = self.service.library()["sources"][0]
+        payload = {"url": "https://www.youtube.com/watch?v=abcdefghijk", "rights_confirmed": True}
+        first = self.service.import_link(payload)["link"]
+        second = self.service.import_link(payload)["link"]
+        self.service.attach_link(first["id"], {"source_id": source["id"]})
+        with self.service.db() as db:
+            original = Path(self.service._source(db, source["id"])["path"])
+            folder, _ = self.service._artifact(db, clip["id"])
+            artifact_before = (folder / "artifact.json").read_bytes()
+        for invalid in ({}, {"confirmed": False}, {"confirmed": True, "delete_files": True}):
+            with self.assertRaises(WebError):
+                self.service.delete_link(first["id"], invalid)
+        self.assertEqual(self.service.delete_link(first["id"], {"confirmed": True}), {"deleted": first["id"]})
+        library = self.service.library()
+        self.assertEqual([link["id"] for link in library["links"]], [second["id"]])
+        self.assertEqual(library["sources"][0]["source_url"], first["url"])
+        self.assertEqual(library["clips"][0]["id"], clip["id"])
+        self.assertEqual(original.read_bytes(), b"0123456789")
+        self.assertEqual((folder / "artifact.json").read_bytes(), artifact_before)
+        with self.assertRaises(WebError) as missing:
+            self.service.delete_link(first["id"], {"confirmed": True})
+        self.assertEqual(missing.exception.status, 404)
+        self.service.close()
+        self.service = WebService(self.config)
+        self.assertEqual([link["id"] for link in self.service.library()["links"]], [second["id"]])
+
+    def test_delete_link_rejects_active_import_even_after_source_is_attached(self):
+        with patch.object(self.service.pending, "put"):
+            result = self.service.import_link({"url": "https://media.example.com/a.mp4", "rights_confirmed": True})
+        link_id = result["link"]["id"]
+        with self.assertRaises(WebError) as active:
+            self.service.delete_link(link_id, {"confirmed": True})
+        self.assertEqual(active.exception.status, 409)
+        with self.service.db() as db:
+            link = self.service._link(db, link_id)
+            link["state"] = "ready"
+            self.service._save_link(db, link)
+        with self.assertRaises(WebError):
+            self.service.delete_link(link_id, {"confirmed": True})
+
+    def test_failed_worker_lock_does_not_leave_an_undeletable_import(self):
+        from filelock import Timeout
+        with patch.object(self.service, "engine_lock", side_effect=Timeout("test workspace lock")):
+            result = self.service.import_link({"url": "https://media.example.com/a.mp4", "rights_confirmed": True})
+            job = self.wait_job(result["job"]["id"])
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(self.service.library()["links"][0]["state"], "failed")
+        self.service.delete_link(result["link"]["id"], {"confirmed": True})
+        self.assertEqual(self.service.library()["links"], [])
 
     def test_range_parser(self):
         self.assertEqual(parse_range("bytes=-4", 10), (6, 9))

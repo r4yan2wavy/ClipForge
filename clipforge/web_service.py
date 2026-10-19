@@ -377,6 +377,26 @@ class WebService:
                 raise
             return {"link": self.link_record(link), **result}
 
+    def delete_link(self, link_id, payload):
+        _strict_keys(payload, {"confirmed"})
+        if payload.get("confirmed") is not True:
+            raise WebError("Confirm you want to delete this saved link.")
+        with self.guard, self.db() as db:
+            link = self._link(db, link_id)
+            importing = link["state"] == "importing"
+            for row in db.conn.execute("SELECT data FROM web_jobs"):
+                job = json.loads(row["data"])
+                if (job.get("kind") == "link_import" and job["state"] in ACTIVE
+                        and job.get("payload", {}).get("link_id") == link_id):
+                    importing = True
+                    break
+            if importing:
+                raise WebError("Wait for this link import to finish before deleting the saved link.", 409)
+            # The saved reference is independent of sources, files and artifacts.
+            # Source provenance and publication history must remain intact.
+            db.conn.execute("DELETE FROM web_links WHERE id=?", (link_id,))
+            return {"deleted": link_id}
+
     def _import_link_task(self, db, job):
         from .link_import import LinkError, VIDEO_EXTENSIONS, download_video, twitch_download
         import urllib.parse
@@ -609,6 +629,11 @@ class WebService:
                 except Exception as exc:
                     # Never expose subprocess stderr, credential URLs or raw HTTP exceptions.
                     job.update(state="failed", stage="failed", message=f"The task could not finish ({type(exc).__name__}). Check local prerequisites and retry.")
+                if job["kind"] == "link_import" and job["state"] == "failed":
+                    link = self._link(db, job["payload"]["link_id"])
+                    if link["state"] == "importing":
+                        link.update(state="failed", message=job["message"])
+                        self._save_link(db, link)
                 self._save_job(db, job)
 
     def _prepare(self, db, job):
