@@ -1,5 +1,36 @@
 # Validation record
 
+## Link imports and social publishing, version 0.3.0
+
+The combined offline suite passed **169 tests and 57 subtests** in 18.14 seconds
+on Windows / Python 3.12, using the configured real FFmpeg/ffprobe. An additional
+cross-platform snapshot regression passed separately (170 unique tests total),
+and expanded HTTP route assertions passed in the focused transport check.
+
+- A real HTTPS import downloaded the project's own 1,961,933-byte synthetic
+  sample from its GitHub repository through the DNS-pinned downloader, registered
+  it through the localhost API, rendered a 1080x1920 MP4, approved and downloaded
+  the result, checked byte-range playback, and confirmed sample publication is
+  blocked. The isolated workspace sent no social posts.
+- Link tests cover public-only DNS/IP validation, IPv4-mapped private addresses,
+  TLS SNI and destination pinning, redirect revalidation, platform CDN refusal,
+  signed query redaction, type/size/time/cancellation limits, transfer cleanup,
+  Twitch token/app/editor/broadcaster checks, and separation of API credentials
+  from media transfers. Platform page references and source-file attachment
+  preserve source provenance without scraping or embedding external scripts.
+- Mocked Instagram/TikTok protocol tests cover real request shapes, binary/chunk
+  boundaries, current creator options, account identity, consent/disclosures,
+  strict captions, expiry, immutable intents, deferred Instagram finishing and
+  protection against repeated publication after lost/5xx responses. Shared
+  artifacts stay frozen across platforms; YouTube declarations live in their
+  own publication snapshot.
+- Browser inspection confirmed the new Paste a link dialog, linked source
+  library, Instagram/TikTok/Twitch settings and setup-needed messages. No live
+  account credentials were supplied, and no real Twitch import, provider OAuth,
+  Instagram post, TikTok post or platform approval was performed. Those account
+  integrations still require the documented authorization and provider review.
+- New audio renders use AAC at 128 kbps, with render-cache versions updated.
+
 ## Local browser studio, version 0.2.0
 
 The combined suite passed **97 tests and 51 subtests** in 17.41 seconds on

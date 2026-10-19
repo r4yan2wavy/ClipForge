@@ -14,7 +14,7 @@ from .captions import Caption, _plain, ass_text, srt_text
 from .common import Settings, atomic_json, run_command, sha256_file
 from .factory import _video_graph, probe_media, verify_output
 
-MANUAL_RENDER_VERSION = "1"
+MANUAL_RENDER_VERSION = "2"
 
 
 def render_manual(settings: Settings, media: Path, out_dir: Path, *, start_s: float,
@@ -105,7 +105,7 @@ def render_manual(settings: Settings, media: Path, out_dir: Path, *, start_s: fl
                  "-map", "[v]", "-map", "[a]", "-t", f"{duration:.9f}",
                  "-c:v", "libx264", "-preset", settings.render.preset,
                  "-crf", str(settings.render.crf), "-pix_fmt", "yuv420p", "-c:a", "aac",
-                 "-b:a", "160k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart",
+                 "-b:a", "128k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart",
                  "-map_metadata", "-1", "clip.mp4"]
         stage("rendering")
         run_command(args, cwd=temporary)

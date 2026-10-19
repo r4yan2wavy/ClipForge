@@ -37,13 +37,19 @@ The server binds to `127.0.0.1`, so the app is available on this computer. Keep 
 ## Make your first clip
 
 1. Open **Settings** and check the prerequisites. The manual editor needs FFmpeg and ffprobe. Enter their full paths if your installed executables are not on PATH, save, and check again.
-2. Open **Studio** and add a video. Browser upload copies a file into ClipForge's workspace. Importing an existing local file by its full path registers that file in place; keep it at that path while it is in use. **Try a sample** registers the included synthetic test pattern and tones.
+2. Open **Studio** and add a video. Browser upload copies a file into ClipForge's workspace. Importing an existing local file by its full path registers that file in place; keep it at that path while it is in use. The link option downloads eligible direct HTTPS media/Twitch clips or saves a platform reference awaiting your authorized original. **Try a sample** registers the included synthetic test pattern and tones.
 3. Choose **Pick a moment** for manual mode, enter a title, and set a start and end inside the source. A manual cut can be 1–180 seconds. Confirm you own the recording or have permission to edit it, and complete its rights/credit information.
 4. Choose framing: **center crop** fills the vertical frame and trims the sides; **fit** preserves the whole image with padding; **blur** fits the image over a blurred background. Optional manual text is a static overlay for the entire cut. It does not listen to the audio or generate timed subtitles.
 5. Render the clip. The job list shows its current processing stage. Progress follows stages; it is not a precise FFmpeg percentage.
 6. In **Clips**, watch the render, edit its title, description and tags, confirm your review, and download the MP4. Review the cut's meaning, framing, captions and credits before publishing it anywhere.
 
-Manual mode performs a real local render. It does not run speech recognition or a model. The sample is already synthetic media and is blocked from YouTube publication through this app.
+Manual mode performs a real local render. It does not run speech recognition or a model. The sample is already synthetic media and is blocked from platform publication through this app.
+
+## Add a link
+
+Choose **Paste a link** in Studio to add an authorized direct HTTPS video, Twitch clip, or platform page. Direct files download into the workspace; Twitch clip downloads need a broadcaster/editor OAuth token in a private file. Other platform pages appear under **Linked videos** as **Video file needed**. Choose **Attach a video** to select an authorized library source or upload your original before editing.
+
+The app does not scrape arbitrary platform streams. There must be real media in the library before a reference can produce a clip. See the [link import guide](link-import.md) for supported flows, limits, Twitch credentials and handling signed URLs. Downloading a linked file uses an internet connection even though subsequent rendering stays local.
 
 ## Add local AI
 
@@ -89,6 +95,20 @@ Submitted clips are kept immutable so a retry cannot silently change an existing
 
 For a safely resumable transfer, the clip's review panel offers **Resume existing upload** after any required quota wait or reconnection. This reuses the original reviewed artifact, channel, metadata, declarations and schedule. If the transfer needs reconciliation, follow the upload guide before taking further publication actions. Refresh publishing status in Settings to update processing results.
 
+## Optional Instagram and TikTok publishing
+
+Use **Publish to Instagram** or **Publish to TikTok** in a reviewed clip's panel. Each platform has its own account, credentials and confirmation. The app uploads the actual prepared MP4 through the official APIs; you do not need to host the clip at a public URL. Local rendering and downloads work without either integration.
+
+These integrations require external developer setup: obtain the platform's approved app permissions and your account's authorized token, save the token in a private JSON file, then enter its file path and enable that destination in **Settings**. ClipForge does not register these applications, complete their OAuth flows, renew tokens or obtain provider approval automatically. Placeholder files are included for [Instagram](../examples/instagram.credentials.example.json) and [TikTok](../examples/tiktok.credentials.example.json); copy them into your private `secrets/` folder and replace every placeholder before use. Never commit the completed files.
+
+**Instagram Reels:** use the supported Facebook Login for Business flow with a Page access token linked to the target Instagram Professional account. The JSON `account_id` and configured target account ID must match. This is separate from an Instagram Login token. Review the caption and exact destination before confirming the upload. See the [social publishing guide](social-publishing.md) and [Meta's official Reels sample](https://github.com/fbsamples/reels_publishing_apis/blob/main/insta_reels_publishing_api_sample/README.md).
+
+**TikTok:** use an authorized `video.publish` token. The form fetches current creator information; check the displayed account, choose one of its permitted privacy settings, and explicitly choose interactions/disclosures and confirm music usage. No privacy option is preselected. Unaudited clients are limited to private accounts and `SELF_ONLY`; public posting requires TikTok's audit. Setting `client_audited` in a JSON file records your application's real status and does not grant approval. TikTok's intended-use guidelines exclude tools limited to private/team account management and copying arbitrary content from other platforms. A public consumer app still needs its own eligible review. [TikTok setup](https://developers.tiktok.com/docs/en/content-posting-api-get-started), [content-sharing requirements](https://developers.tiktok.com/docs/en/content-sharing-guidelines).
+
+Submitting an upload is not proof that a post has finished processing or become visible. Use **Check status** for that destination. An Instagram container that finishes processing can offer **Finish Instagram publishing** to publish the existing prepared container. If a request's outcome is unknown, refresh/reconcile the existing publication; repeated new submissions can create duplicates. Existing publication inputs stay fixed, and social publication does not add unattended retries or scheduled posting. Follow the [platform setup and recovery guide](social-publishing.md) for exact states and supported actions.
+
+To stop local use of Instagram/TikTok credentials, disable the destination and remove its private token file. That local removal does not revoke the provider's authorization or delete a post. Revoke permissions through the provider separately when needed. Keep credential files and backups limited to your OS account; this is local file storage, not an encrypted credential vault.
+
 ## Where your files live
 
 The default workspace is the project folder. `config.json` holds settings. `data/state.sqlite3` stores the library, jobs and pipeline state; browser uploads go into `data/studio/sources/`, and their job manifests into `data/studio/manifests/`. `data/cache/` stores caches, and `prepared/` contains generated clip artifacts. Credentials, if configured, belong in `secrets/`. The app shows the current workspace path. These locations follow the configured data/cache root if you customize it.
@@ -111,7 +131,7 @@ A missing config is created with defaults. `paths.root` defaults to the config f
 
 The browser interface uses files served by the local application, with no hosted fonts, scripts or analytics. The server accepts local requests and protects state changes with an app token and origin checks. The browser is not given OAuth tokens or upload-session URLs.
 
-Manual rendering needs no external service. AI inference uses local speech weights and loopback Ollama. Installing software and downloading models requires internet access; optional OAuth, publish, status-check and revoke actions connect to Google/YouTube. The separate CLI discovery commands connect to YouTube when invoked. Keep OAuth credentials, private recordings, model files and runtime data out of public repositories.
+Manual rendering needs no external service. AI inference uses local speech weights and loopback Ollama. Installing software and downloading models requires internet access. Explicit direct-link imports connect to the file's host; Twitch imports validate the token and connect to Twitch/download hosts. Optional publishing and status checks connect to the selected YouTube, Instagram or TikTok services, and YouTube authorization/revocation uses Google. Opening an original link contacts that website in your browser. The separate CLI discovery commands connect to YouTube when invoked. Keep credentials, signed source URLs, private recordings, model files and runtime data out of public repositories.
 
 ## Troubleshooting
 
@@ -122,5 +142,8 @@ Manual rendering needs no external service. AI inference uses local speech weigh
 - **AI not ready:** check the optional AI package, complete local speech-model directory, running local Ollama server and exact downloaded model name. Manual mode remains available when FFmpeg is ready.
 - **A job failed or was interrupted:** read its message and fix the missing file/tool or invalid setting before retrying. Keep imported source files in place. Restarting does not resume a partially written render automatically.
 - **No automatic timed captions in manual mode:** its optional text is a fixed overlay. Use AI mode after installing local inference tools for speech-based captions.
+- **A platform link says it needs a file:** it is a saved reference. Upload/import your authorized original and attach that source. A webpage is not automatically a downloadable video.
+- **Twitch import cannot authorize:** check the token's app ID, broadcaster/editor IDs, granted clip-management scope and real expiration; obtain a renewed authorized token externally if needed.
+- **Instagram/TikTok rejects publication:** check the private token file, account/app permissions, current provider limits and destination-specific status. Update expired tokens through the provider's OAuth process. Read the [recovery guide](social-publishing.md) before retrying an uncertain submission.
 
 See [README.md](../README.md) for the full command-line pipeline, architecture, policies and current verification scope.

@@ -553,7 +553,7 @@ def _transfer(settings: Settings, db: DB, row: dict[str, Any], session,
 
 
 def upload_prepared(settings: Settings, db: DB, artifact_dir: Path,
-                    enable_upload: bool = False) -> dict[str, Any]:
+                    enable_upload: bool = False, *, publication_options: dict | None = None) -> dict[str, Any]:
     try:
         artifact = json.loads((Path(artifact_dir) / "artifact.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -603,7 +603,14 @@ def upload_prepared(settings: Settings, db: DB, artifact_dir: Path,
         return _public(_update(db, row, state="needs_reconciliation", error="insert_outcome_unknown"))
     try:
         if not row:
-            body, publish_at = _body(settings, artifact)
+            body_artifact = artifact
+            if publication_options is not None:
+                import copy
+                if set(publication_options) != {"made_for_kids", "contains_synthetic_media", "schedule"}:
+                    raise ValueError("invalid_publication_options")
+                body_artifact = copy.deepcopy(artifact)
+                body_artifact["source_manifest"].update(publication_options)
+            body, publish_at = _body(settings, body_artifact)
         elif safe_new_session:
             body = json.loads(row["metadata_json"])
             validate_schedule(row["publish_at"], settings.upload.min_lead_minutes)

@@ -38,6 +38,9 @@ EXPOSED = {
     "brain": {"model", "min_clip_s", "max_clip_s", "max_clips"},
     "render": {"ffmpeg", "ffprobe", "font_size"},
     "upload": {"enabled", "target_channel_id", "client_secrets", "privacy_status"},
+    "instagram": {"enabled", "credentials_file", "target_account_id", "api_version"},
+    "tiktok": {"enabled", "credentials_file"},
+    "twitch": {"credentials_file"},
 }
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".ts", ".mts", ".m2ts"}
 ACTIVE = {"queued", "running"}
@@ -90,19 +93,33 @@ class WebService:
         self.thread.start()
 
     def _initialize_database(self):
+        import re
+        # No server requests exist yet, and this workspace's singleton lock is held.
+        # Reap only app-generated staging names left by interrupted transfers.
+        for partial in (self.data_dir / "sources").glob("*.part"):
+            if partial.is_file() and re.fullmatch(r"[0-9a-f]{32}(?:\.[a-z0-9]{1,8})?\.part", partial.name):
+                partial.unlink(missing_ok=True)
         with self.db() as db:
             from .upload import _schema
             _schema(db)
+            from .social_publish import schema
+            schema(db)
             db.conn.executescript("""
               CREATE TABLE IF NOT EXISTS web_sources(id TEXT PRIMARY KEY, data TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS web_jobs(id TEXT PRIMARY KEY, data TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS web_clips(clip_id TEXT PRIMARY KEY, source_id TEXT, job_id TEXT);
+              CREATE TABLE IF NOT EXISTS web_links(id TEXT PRIMARY KEY, data TEXT NOT NULL);
             """)
             for row in db.conn.execute("SELECT * FROM web_jobs").fetchall():
                 job = json.loads(row["data"])
                 if job["state"] in ACTIVE:
                     job.update(state="interrupted", stage="interrupted", message="ClipForge stopped before this task finished. Retry when ready.")
                     self._save_job(db, job)
+            for row in db.conn.execute("SELECT * FROM web_links").fetchall():
+                link = json.loads(row["data"])
+                if link["state"] == "importing":
+                    link.update(state="failed", message="The download was interrupted. Retry it explicitly, or attach your authorized file.")
+                    self._save_link(db, link)
             from .upload import expire_owner_observations
             from .sourcing import purge
             purge(db, self.settings.discovery.retention_days)
@@ -162,6 +179,11 @@ class WebService:
         ready = bool(extras and self.settings.upload.target_channel_id and self.settings.resolve(self.settings.upload.client_secrets).is_file())
         result["youtube"] = {"ok": ready, "message": "YouTube setup is ready; use Connect YouTube to authorize." if ready else
             "Optional: install YouTube dependencies, set your channel ID and Desktop OAuth client file, then connect."}
+        from .link_import import twitch_status
+        from .social_publish import provider_status
+        result["twitch"] = twitch_status(self.settings)
+        for platform in ("instagram", "tiktok"):
+            result[platform] = provider_status(self.settings, platform)
         self.capabilities = result
         return result
 
@@ -193,6 +215,9 @@ class WebService:
 
     def job_record(self, job, db):
         record = {k: v for k, v in job.items() if k not in {"payload", "engine_id", "kind", "retry_requested"}}
+        if job.get("kind", "").startswith("social_"):
+            record["platform"] = job["payload"]["platform"]
+            record["target_clip_id"] = job["payload"]["clip_id"]
         if job["state"] == "running" and job.get("engine_id"):
             row = db.conn.execute("SELECT state FROM jobs WHERE id=?", (job["engine_id"],)).fetchone()
             if row and row["state"] in {"TRANSCRIBING", "SELECTING", "RENDERING"}:
@@ -220,6 +245,8 @@ class WebService:
         source = self._source(db, link["source_id"]) if link and link["source_id"] else {}
         render = artifact.get("render_spec", {}).get("render", {})
         can_resume, resume_message = self._resume_availability(artifact, dict(publication) if publication else None)
+        from .social_publish import public_records
+        social = public_records(db, clip_id)
         return {"id": clip_id, "job_id": link["job_id"] if link else artifact.get("job_id"), "title": meta.get("title", "Untitled clip"),
                 "description": meta.get("description", ""), "tags": meta.get("tags", []),
                 "duration_s": float(candidate.get("end_s", 0)) - float(candidate.get("start_s", 0)),
@@ -229,7 +256,8 @@ class WebService:
                 "download_url": f"/media/clip/{clip_id}?download=1", "caption_url": f"/media/caption/{clip_id}" if artifact.get("caption_path") else None,
                 "framing": artifact.get("source_manifest", {}).get("framing", "center_crop"),
                 "start_s": candidate.get("start_s", 0), "end_s": candidate.get("end_s", 0), "reason": candidate.get("reason", ""),
-                "submitted": bool(publication), "is_demo": bool(source.get("is_demo") or artifact.get("web_is_demo")),
+                "submitted": bool(publication or social), "social_publications": social,
+                "is_demo": bool(source.get("is_demo") or artifact.get("web_is_demo")),
                 "can_resume": can_resume, "resume_message": resume_message,
                 "publication": _public(dict(publication)) if publication else None}
 
@@ -271,7 +299,118 @@ class WebService:
                     clips.append(self._clip_record(db, artifact))
                 except WebError:
                     pass
-            return {"sources": sources, "jobs": jobs, "clips": clips}
+            links = [self.link_record(json.loads(row["data"])) for row in db.conn.execute("SELECT data FROM web_links ORDER BY rowid DESC")]
+            return {"sources": sources, "jobs": jobs, "clips": clips, "links": links}
+
+    @staticmethod
+    def link_record(link):
+        return {key: value for key, value in link.items() if key not in {"private_url", "clip_id"}}
+
+    def _save_link(self, db, link):
+        db.conn.execute("INSERT OR REPLACE INTO web_links VALUES(?,?)", (link["id"], json.dumps(link)))
+
+    def _link(self, db, link_id):
+        row = db.conn.execute("SELECT data FROM web_links WHERE id=?", (link_id,)).fetchone()
+        if not row:
+            raise WebError("This saved link could not be found.", 404)
+        return json.loads(row["data"])
+
+    def import_link(self, payload):
+        from .link_import import LinkError, describe, twitch_status
+        _strict_keys(payload, {"url", "rights_confirmed"})
+        if payload.get("rights_confirmed") is not True:
+            raise WebError("Confirm you have permission to download and edit this video.")
+        try:
+            descriptor = describe(payload.get("url"))
+        except LinkError as exc:
+            raise WebError(str(exc)) from None
+        with self.guard, self.db() as db:
+            link = dict(descriptor, id=uuid.uuid4().hex, created_at=iso_now(), state="needs_file", source_id=None)
+            if descriptor["platform"] == "direct":
+                # Signed query strings stay in local private records, never the browser library.
+                link["private_url"] = payload["url"]
+            ready = descriptor["platform"] == "direct" or (descriptor["clip_id"] and twitch_status(self.settings)["ok"])
+            if ready:
+                link.update(state="importing", message="Downloading the authorized video into your local library…")
+            self._save_link(db, link)
+            result = {"link": self.link_record(link)}
+            if ready:
+                try:
+                    result.update(self._enqueue(db, "link_import", {"link_id": link["id"]}, title="Import video link"))
+                except WebError:
+                    link.update(state="failed", message="The import queue is full. Retry this saved link when tasks finish.")
+                    self._save_link(db, link)
+                    raise
+            return result
+
+    def attach_link(self, link_id, payload):
+        _strict_keys(payload, {"source_id"})
+        with self.guard, self.db() as db:
+            link = self._link(db, link_id)
+            if link["state"] == "importing":
+                raise WebError("Wait for this link download to finish before attaching a different file.", 409)
+            source = self._source(db, _text(payload.get("source_id"), "video source", 128))
+            if not Path(source["path"]).is_file():
+                raise WebError("The attached video was moved or deleted. Add it again.", 409)
+            source["source_url"] = link["url"]
+            db.conn.execute("UPDATE web_sources SET data=? WHERE id=?", (json.dumps(source), source["id"]))
+            link.update(state="ready", source_id=source["id"], message="Your video file is attached and ready to edit.")
+            self._save_link(db, link)
+            return {"link": self.link_record(link), "source": self.source_record(source)}
+
+    def retry_link(self, link_id, payload):
+        from .link_import import twitch_status
+        _strict_keys(payload, set())
+        with self.guard, self.db() as db:
+            link = self._link(db, link_id)
+            if link["state"] not in {"failed", "needs_file"} or not link["can_download"]:
+                raise WebError("This link cannot be downloaded. Attach an authorized video file instead.", 409)
+            if link["platform"] == "twitch" and not twitch_status(self.settings)["ok"]:
+                raise WebError("Configure current Twitch broadcaster/editor credentials in Settings first.", 409)
+            link.update(state="importing", message="Downloading the authorized video into your local library…")
+            self._save_link(db, link)
+            try:
+                result = self._enqueue(db, "link_import", {"link_id": link_id}, title="Import video link")
+            except WebError:
+                link.update(state="failed", message="The import queue is full. Retry this saved link when tasks finish.")
+                self._save_link(db, link)
+                raise
+            return {"link": self.link_record(link), **result}
+
+    def _import_link_task(self, db, job):
+        from .link_import import LinkError, VIDEO_EXTENSIONS, download_video, twitch_download
+        import urllib.parse
+        link = self._link(db, job["payload"]["link_id"])
+        target = None
+        try:
+            if link.get("source_id"):
+                job["result_message"] = "This source is already available in your library."
+                return
+            url = link.get("private_url", link["url"])
+            name = "Imported video"
+            if link["platform"] == "twitch":
+                url, name = twitch_download(self.settings, link["clip_id"])
+            extension = Path(urllib.parse.unquote(urllib.parse.urlsplit(url).path)).suffix.lower()
+            if extension not in VIDEO_EXTENSIONS:
+                extension = ".mp4"
+            target = self.data_dir / "sources" / (uuid.uuid4().hex + extension)
+            self._stage(db, job, "downloading")
+            download_video(url, target, twitch=link["platform"] == "twitch", cancelled=self.stop.is_set)
+            source = self.register_source(target, name + extension)
+            # Use this worker connection to install the complete association together.
+            raw = self._source(db, source["id"])
+            raw["source_url"] = link["url"]
+            db.conn.execute("UPDATE web_sources SET data=? WHERE id=?", (json.dumps(raw), source["id"]))
+            link.update(state="ready", source_id=source["id"], message="Video imported into your local library. Choose Create clip to edit it.")
+            self._save_link(db, link)
+            job["result_message"] = link["message"]
+        except Exception as exc:
+            if target:
+                target.unlink(missing_ok=True)
+            message = str(exc) if isinstance(exc, (LinkError, WebError)) else "The video import could not finish. Check the link and local tools, then retry explicitly."
+            link.update(state="failed", message=message)
+            self._save_link(db, link)
+            raise WebError(message) from None
 
     def get_clip(self, clip_id):
         with self.db() as db:
@@ -388,7 +527,8 @@ class WebService:
         if sum(json.loads(r["data"])["state"] in ACTIVE for r in db.conn.execute("SELECT data FROM web_jobs")) >= 20:
             raise WebError("The queue is full. Let a few tasks finish before adding more.", 409)
         job = {"id": uuid.uuid4().hex, "kind": kind, "payload": payload,
-               "source_id": source["id"] if source else None, "source_name": source["name"] if source else "YouTube",
+               "source_id": source["id"] if source else None,
+               "source_name": source["name"] if source else ("Video link" if kind == "link_import" else payload.get("platform", "YouTube").title()),
                "title": title or kind.replace("_", " ").title(), "mode": payload.get("mode", kind),
                "state": "queued", "stage": "queued", "message": "Waiting for the local worker…", "progress": 0,
                "created_at": iso_now(), "clip_ids": []}
@@ -404,7 +544,7 @@ class WebService:
             if job["state"] not in {"failed", "interrupted"}:
                 raise WebError("Only failed or interrupted tasks can be retried.", 409)
             if job["kind"] != "clip":
-                raise WebError("Use the original YouTube action to retry explicitly.", 409)
+                raise WebError("Use the saved link or platform publishing controls to continue this task explicitly.", 409)
             job.update(state="queued", stage="queued", message="Waiting to retry…", progress=0)
             job["retry_requested"] = True
             self._save_job(db, job)
@@ -414,7 +554,10 @@ class WebService:
     def _stage(self, db, job, stage):
         messages = {"preparing": "Checking the source and local tools…", "rendering": "Rendering your vertical clip…",
                     "verifying": "Checking the rendered clip…", "authorizing": "Complete YouTube consent in the browser window…",
-                    "publishing": "Sending the reviewed clip to YouTube…", "polling": "Checking YouTube processing status…", "revoking": "Disconnecting YouTube…"}
+                    "publishing": "Sending the reviewed clip to YouTube…", "polling": "Checking YouTube processing status…", "revoking": "Disconnecting YouTube…",
+                    "downloading": "Downloading the authorized video into your local library…",
+                    "social_publishing": "Sending the reviewed clip to the selected platform…",
+                    "social_polling": "Checking the selected platform's processing status…"}
         job.update(stage=stage, message=messages.get(stage, stage.title()), progress={"preparing": 5, "rendering": 40, "verifying": 90}.get(stage, 20))
         self._save_job(db, job)
 
@@ -449,6 +592,10 @@ class WebService:
                         expire_owner_observations(db)
                         if job["kind"] == "clip":
                             self._prepare(db, job)
+                        elif job["kind"] == "link_import":
+                            self._import_link_task(db, job)
+                        elif job["kind"].startswith("social_"):
+                            self._social_task(db, job)
                         else:
                             self._youtube_task(db, job)
                         job.update(state="completed", stage="ready", progress=100,
@@ -470,6 +617,7 @@ class WebService:
         source = self._source(db, job["source_id"])
         manifest = SourceManifest(media_path=source["path"], **{k: payload[k] for k in
             ("rights_category", "permission_reference", "creator_credit", "contribution", "framing")})
+        manifest.source_url = source.get("source_url")
         manifest_path = self.data_dir / "manifests" / (job["id"] + ".json")
         atomic_json(manifest_path, manifest.model_dump())
         if payload["mode"] == "ai":
@@ -491,6 +639,8 @@ class WebService:
             existing = db.conn.execute("SELECT 1 FROM publications WHERE clip_id=?", (clip_id,)).fetchone()
             if existing:
                 raise WebError("This clip already has a publication record. Its existing files must be preserved.", 409)
+            if db.conn.execute("SELECT 1 FROM social_publications WHERE clip_id=?", (clip_id,)).fetchone():
+                raise WebError("This clip already has an Instagram or TikTok publication record. Its files must be preserved.", 409)
             self._stage(db, job, "rendering")
             rendered = render_manual(self.settings, Path(source["path"]), folder,
                 start_s=float(payload["start_s"]), end_s=float(payload["end_s"]), framing=payload["framing"],
@@ -588,6 +738,88 @@ class WebService:
                 raise WebError("Install the YouTube dependencies and configure your channel ID and OAuth client file first.", 409)
             return self._enqueue(db, action, {}, title={"authorize": "Connect YouTube", "poll": "Check YouTube status", "revoke": "Disconnect YouTube"}[action])
 
+    def social_creator(self, platform):
+        from .social_publish import SocialError, creator_info, provider_status
+        if platform not in {"instagram", "tiktok"}:
+            raise WebError("Unknown publishing platform.", 404)
+        readiness = provider_status(self.settings, platform)
+        if not readiness["ok"]:
+            raise WebError(readiness["message"], 409)
+        try:
+            return creator_info(self.settings, platform)
+        except SocialError as exc:
+            raise WebError(str(exc), 409) from None
+
+    def _social_setup_hash(self, platform):
+        config = getattr(self.settings, platform)
+        try:
+            return stable_id({"settings": config.model_dump(), "credentials": sha256_file(self.settings.resolve(config.credentials_file))})
+        except OSError:
+            raise WebError("The platform credential file is unavailable. Check Settings and the publishing guide.", 409) from None
+
+    def social_action(self, clip_id, platform, action, payload):
+        from .social_publish import SocialError, provider_status, public_records, validate_options
+        if platform not in {"instagram", "tiktok"} or action not in {"publish", "refresh", "finish"}:
+            raise WebError("Unknown publishing action.", 404)
+        if action == "finish" and platform != "instagram":
+            raise WebError("Only an existing Instagram container can be finished.", 409)
+        try:
+            if action == "publish":
+                options = validate_options(platform, payload)
+            else:
+                _strict_keys(payload, {"confirmed"} if action == "finish" else set())
+                if action == "finish" and payload.get("confirmed") is not True:
+                    raise WebError("Confirm you want to finish the saved Instagram publication.")
+                options = dict(payload)
+        except SocialError as exc:
+            raise WebError(str(exc)) from None
+        with self.guard, self.db() as db:
+            folder, artifact = self._artifact(db, clip_id)
+            record = self._clip_record(db, artifact)
+            if record["is_demo"]:
+                raise WebError("The synthetic sample cannot be published. Use your own authorized video.", 409)
+            if artifact.get("state") != "PREPARED":
+                raise WebError("Review and approve this clip before publishing.", 409)
+            if not provider_status(self.settings, platform)["ok"]:
+                raise WebError("Configure and enable this platform in Settings first. See the publishing setup guide.", 409)
+            for row in db.conn.execute("SELECT data FROM web_jobs"):
+                job = json.loads(row["data"])
+                if job["state"] in ACTIVE and job.get("payload", {}).get("clip_id") == clip_id and job.get("payload", {}).get("platform") == platform:
+                    raise WebError("A publishing action for this clip and platform is already queued or running.", 409)
+            existing = public_records(db, clip_id).get(platform)
+            if action == "publish" and existing:
+                raise WebError("This platform already has a saved publication. Refresh its status or finish the existing Instagram container.", 409)
+            if action != "publish" and not existing:
+                raise WebError("There is no saved publication for this platform.", 409)
+            if action == "finish" and not existing.get("can_finish"):
+                raise WebError("Refresh Instagram status first. Only a ready, unsubmitted container can be finished.", 409)
+            return self._enqueue(db, "social_" + action, {"platform": platform, "clip_id": clip_id,
+                "options": options, "reviewed_artifact_hash": stable_id(artifact), "setup_hash": self._social_setup_hash(platform)},
+                title={"publish": "Publish to ", "refresh": "Check ", "finish": "Finish publishing to "}[action] + platform.title())
+
+    def _social_task(self, db, job):
+        from .social_publish import SocialError, finish, publish, refresh
+        payload = job["payload"]
+        platform = payload["platform"]
+        folder, artifact = self._artifact(db, payload["clip_id"])
+        record = self._clip_record(db, artifact)
+        if record["is_demo"] or artifact.get("state") != "PREPARED":
+            raise WebError("The reviewed clip is unavailable or is a setup sample.", 409)
+        if stable_id(artifact) != payload["reviewed_artifact_hash"] or self._social_setup_hash(platform) != payload["setup_hash"]:
+            raise WebError("The clip, account settings or credentials changed after confirmation. Review the current details before submitting again.", 409)
+        self._stage(db, job, "social_polling" if job["kind"] == "social_refresh" else "social_publishing")
+        try:
+            if job["kind"] == "social_refresh":
+                result = refresh(self.settings, db, artifact["clip_id"], platform)
+            elif job["kind"] == "social_finish":
+                result = finish(self.settings, db, folder, platform)
+            else:
+                result = publish(self.settings, db, folder, platform, payload["options"])
+        except SocialError as exc:
+            raise WebError(str(exc), 409) from None
+        job["clip_ids"] = [artifact["clip_id"]]
+        job["result_message"] = result.get("message", "Platform status updated. Open the clip to review its publication details.")
+
     def publish(self, clip_id, payload):
         _strict_keys(payload, {"confirmed", "made_for_kids", "contains_synthetic_media", "schedule"})
         if payload.get("confirmed") is not True or any(type(payload.get(k)) is not bool for k in ("made_for_kids", "contains_synthetic_media")):
@@ -606,7 +838,7 @@ class WebService:
                 raise WebError("Review and approve this clip before publishing.", 409)
             if not self.settings.upload.enabled or not self.settings.upload.target_channel_id:
                 raise WebError("Enable YouTube publishing and configure the target channel in Settings first.", 409)
-            if record["submitted"]:
+            if record["publication"]:
                 raise WebError("This clip already has a saved publication. Use Resume upload or refresh its publishing status.", 409)
             payload = dict(payload, clip_id=clip_id, reviewed_artifact_hash=stable_id(artifact))
             return self._enqueue(db, "publish", payload, title="Publish " + record["title"])
@@ -664,19 +896,24 @@ class WebService:
                 can_resume, message = self._resume_availability(artifact, dict(existing))
                 if not can_resume:
                     raise WebError(message, 409)
-            elif record["submitted"]:
+            elif record["publication"]:
                 raise WebError("A saved publication now exists for this clip. Refresh its status or explicitly resume that publication.", 409)
             elif not existing:
                 if stable_id(artifact) != payload["reviewed_artifact_hash"]:
                     raise WebError("The clip or metadata changed after publication was confirmed. Review it and submit a new publication request.", 409)
                 from .upload import validate_schedule, _body
-                source = artifact["source_manifest"]
+                import copy
+                publication_artifact = copy.deepcopy(artifact)
+                source = publication_artifact["source_manifest"]
                 source.update(made_for_kids=payload["made_for_kids"], contains_synthetic_media=payload["contains_synthetic_media"],
                               schedule=validate_schedule(payload.get("schedule"), self.settings.upload.min_lead_minutes))
                 # Full metadata/schedule validation before saving this review snapshot.
-                _body(self.settings, artifact)
-                atomic_json(folder / "artifact.json", artifact)
-            result = upload_prepared(self.settings, db, folder, True)
+                _body(self.settings, publication_artifact)
+            if kind == "publish" and not existing:
+                result = upload_prepared(self.settings, db, folder, True, publication_options={key: source[key] for key in
+                    ("made_for_kids", "contains_synthetic_media", "schedule")})
+            else:
+                result = upload_prepared(self.settings, db, folder, True)
             state = result.get("state", "needs_review")
             job["clip_ids"] = [artifact["clip_id"]]
             if state in {"needs_review", "needs_reconciliation", "auth_required", "retry_wait", "quota_wait", "permanent_error"}:

@@ -139,6 +139,10 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
             submitted = None
             if db.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='publications'").fetchone():
                 submitted = db.conn.execute("SELECT * FROM publications WHERE clip_id=?", (clip_id,)).fetchone()
+            if not submitted and db.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='social_publications'").fetchone():
+                social = db.conn.execute("SELECT video_sha256 FROM social_publications WHERE clip_id=?", (clip_id,)).fetchone()
+                if social:
+                    submitted = {"render_sha256": social["video_sha256"]}
             if submitted:
                 # Render identity excludes credits/schedule/approval metadata. Never
                 # replace the exact artifact snapshot an existing intention refers to.
@@ -202,6 +206,8 @@ def retire_artifacts(db: DB, job_id: str, keep_ids: set[str]):
             continue
         submitted = has_publications and db.conn.execute("SELECT 1 FROM publications WHERE clip_id=?",
                                                         (record["clip_id"],)).fetchone()
+        if not submitted and db.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='social_publications'").fetchone():
+            submitted = db.conn.execute("SELECT 1 FROM social_publications WHERE clip_id=?", (record["clip_id"],)).fetchone()
         if not submitted:
             path = Path(record["artifact_dir"]) / "artifact.json"
             if path.exists():
@@ -254,6 +260,9 @@ def assert_editable(db: DB, folder: Path):
     data = json.loads((folder / "artifact.json").read_text(encoding="utf-8"))
     if db.conn.execute("SELECT 1 FROM publications WHERE clip_id=?", (data["clip_id"],)).fetchone():
         raise ReviewRequired("publication intention already exists; preserve its inputs and reconcile if needed")
+    if db.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='social_publications'").fetchone():
+        if db.conn.execute("SELECT 1 FROM social_publications WHERE clip_id=?", (data["clip_id"],)).fetchone():
+            raise ReviewRequired("social publication intention already exists; preserve its inputs and reconcile if needed")
 
 
 def reserve_slot(db: DB, channel_id: str, clip_id: str, candidates: list[datetime]) -> str:

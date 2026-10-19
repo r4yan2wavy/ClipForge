@@ -238,6 +238,25 @@ class UploadConfig(StrictModel):
     poll_every_minutes: int = Field(default=15, ge=1)
 
 
+class InstagramConfig(StrictModel):
+    enabled: bool = False
+    credentials_file: str = "secrets/instagram.json"
+    target_account_id: str = ""
+    api_version: str = "v25.0"
+    request_timeout_s: int = Field(default=60, ge=1, le=300)
+
+
+class TikTokConfig(StrictModel):
+    enabled: bool = False
+    credentials_file: str = "secrets/tiktok.json"
+    request_timeout_s: int = Field(default=60, ge=1, le=300)
+
+
+class TwitchConfig(StrictModel):
+    credentials_file: str = "secrets/twitch.json"
+    request_timeout_s: int = Field(default=60, ge=1, le=300)
+
+
 class Settings(StrictModel):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
@@ -245,6 +264,9 @@ class Settings(StrictModel):
     render: RenderConfig = Field(default_factory=RenderConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     upload: UploadConfig = Field(default_factory=UploadConfig)
+    instagram: InstagramConfig = Field(default_factory=InstagramConfig)
+    tiktok: TikTokConfig = Field(default_factory=TikTokConfig)
+    twitch: TwitchConfig = Field(default_factory=TwitchConfig)
     timezone: str = "America/New_York"
     max_job_attempts: int = Field(default=3, ge=1, le=10)
 

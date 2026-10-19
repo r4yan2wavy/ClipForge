@@ -1,6 +1,6 @@
 # ClipForge Local
 
-Turn your recordings into vertical clips in a browser studio running on your own computer. Import a video, choose a cut and framing, render it, then preview and download the result. Optional local AI can transcribe and find clips; optional YouTube publishing uses your channel's authorization. **The default saves clips locally.**
+Turn your recordings into vertical clips in a browser studio running on your own computer. Add a local video or an authorized source link, choose a cut and framing, render it, then preview and download the result. Optional local AI can transcribe and find clips. YouTube, Instagram Reels and TikTok publishing use the respective platform's official APIs and your authorized account. **The default saves clips locally.**
 
 ## Open the browser app
 
@@ -13,7 +13,13 @@ The launcher creates a private `.venv` and installs the basic Python requirement
 
 Start in **Studio** with **Try a sample**, or add a recording you own or have permission to edit. Choose **Pick a moment** for a manual clip, set its start/end, select crop/fit/blur framing, and render. An optional text overlay shows the words you type for the whole cut; automatic speech captions require the separate AI setup. In **Clips**, preview the actual render, edit its title/description, review it, and download the MP4. The sample is a synthetic test pattern with tones, not speech, and cannot be published through the app.
 
-Manual clips need only Python and FFmpeg. For AI, optional YouTube setup, saved files, and troubleshooting, see the **[browser app guide](docs/local-app.md)**. The command-line pipeline and detailed architecture remain documented below.
+Manual clips need only Python and FFmpeg. For AI, optional publishing setup, saved files, and troubleshooting, see the **[browser app guide](docs/local-app.md)**. The command-line pipeline and detailed architecture remain documented below.
+
+## Add a link and choose where to publish
+
+The studio's link option downloads authorized **direct HTTPS video files** and eligible **Twitch clips through Twitch's official API**. A YouTube, Instagram, TikTok or other supported platform page is saved as a reference; attach your authorized original file to edit it. The [link guide](docs/link-import.md) explains which links produce media, how to attach a source, and Twitch account setup.
+
+After reviewing a clip, use its YouTube, Instagram or TikTok publishing button. Each destination needs separate setup and explicit confirmation. Instagram requires a supported Professional account and a Page access token; TikTok requires approved Content Posting API access. These two integrations use private local credential JSON files rather than a built-in account sign-in flow. See the [social publishing guide](docs/social-publishing.md), including account/app restrictions and recovery after uncertain requests. TikTok's unaudited clients are limited to private accounts and private viewing; public access requires its review. [TikTok Direct Post requirements](https://developers.tiktok.com/docs/en/content-posting-api-get-started).
 
 ## License
 
@@ -23,7 +29,7 @@ Third-party tools, models and dependencies retain their own licenses; see [THIRD
 
 ## Assumptions and costs
 
-One operator, one computer and one intended upload channel. You provide original recordings, creator-delivered originals, or another appropriately authorized media source and verified credits. Discovery does not grant access to media. Initial setup can download open-source software and model weights; subsequent inference uses only local files and loopback Ollama. There are no paid APIs, subscriptions, trial credits or rented GPUs. Electricity, hardware, disk space, bandwidth and your editorial time still cost something.
+One operator and one computer, with one configured account per publishing platform. You provide original recordings, creator-delivered originals, or another appropriately authorized media source and verified credits. Discovery and access to a link do not grant usage rights. Initial setup can download open-source software and model weights; subsequent inference uses only local files and loopback Ollama. Local processing requires no paid AI API, subscription, trial credits or rented GPU. Optional imports and publishing need internet access and the relevant provider permissions; account limits and platform terms apply. Electricity, hardware, disk space, bandwidth and your editorial time still cost something.
 
 The CPU baseline is faster-whisper `small` with `int8`, followed sequentially by a quantized `qwen3:4b-instruct` in Ollama. The model's published download is about 2.5 GB and its listed license is Apache 2.0; memory also includes context, runtime, operating system and transcription. Start with roughly 16 GB system RAM as a planning choice, reduce model/context if needed, and benchmark your own machine. An 8 GB system may need a smaller model and more patience. No speed or accuracy is guaranteed. [Model and license](https://ollama.com/library/qwen3:4b-instruct), [Whisper MIT license](https://github.com/openai/whisper/blob/main/LICENSE).
 
@@ -40,11 +46,13 @@ The CPU baseline is faster-whisper `small` with `int8`, followed sequentially by
 | Captions | Python SRT + ASS, FFmpeg/libass | Suitable installed font, e.g. Arial or DejaVu Sans |
 | Music | Local preapproved catalog | Verified license, permitted use, exact attribution |
 | Optional upload | google-auth, google-auth-oauthlib, Requests | Channel-owner consent, Desktop OAuth client |
+| Direct video links / Twitch clips | Requests / official Twitch API | Public HTTPS media, or authorized broadcaster/editor token |
+| Optional Instagram / TikTok | Requests, official platform APIs | Eligible accounts, approved app scopes, private local token files |
 | Scheduling | cron, Windows Task Scheduler or CLI loop | Computer awake, correct account/environment/absolute paths |
 
 ## Advanced CLI and AI setup
 
-These steps prepare the full command-line, local AI and optional YouTube workflow. For manual cuts in the browser app, use the simpler launch instructions above; Ollama and speech models are optional.
+These steps prepare the full command-line, local AI and optional YouTube workflow. For manual cuts in the browser app, use the simpler launch instructions above; Ollama and speech models are optional. Instagram, TikTok and Twitch use the base Requests dependency and the separate credential setup linked above.
 
 Install Python 3.11 or newer, [FFmpeg](https://ffmpeg.org/download.html) including **ffprobe** and libass, and [Ollama](https://ollama.com/download). Test both executables, and check `ffmpeg -filters` contains `ass`, `sidechaincompress` and `loudnorm`. FFmpeg's licensing depends on the selected build; follow its notices when redistributing binaries. This project does not bundle FFmpeg or model weights.
 
@@ -121,6 +129,8 @@ python -m clipforge approve prepared/CLIP_ID --metadata-reviewed --visual-review
 This records your explicit editorial, metadata and framing approval on that artifact. It does not check the truth of a license or guarantee platform acceptance. If a generated metadata file needs correction, edit **`artifact.json`'s metadata** before approval; `metadata.json` is a convenience export. Never mutate a submitted artifact to force an upload retry. The publication snapshot catches input changes and routes them to reconciliation.
 
 ## Architecture and states
+
+This diagram follows the discovery and YouTube command-line pipeline. The browser studio adds manual rendering, source-link records, and separately confirmed social-publication jobs; see its guides for those flows.
 
 ```mermaid
 flowchart TD
@@ -294,8 +304,15 @@ clipforge/
   captions.py     clip-relative SRT/ASS grouping and safe styling
   factory.py      deterministic FFmpeg rendering, music, output verification
   upload.py       owner OAuth, durable resumable transfer and publication polling
+  link_import.py bounded HTTPS file imports and official Twitch clip downloads
+  social_publish.py official Instagram/TikTok transfers and publication state
+  web.py          loopback HTTP server, local origin protection and media routes
+  web_service.py  persistent browser library, job queue and review actions
+  web_render.py   manual cuts, vertical framing and optional text overlay
+  web_static/     browser interface, local assets and synthetic sample video
   worker.py       CLI, review states, file lock, scheduler, slot allocator
   prompts/        complete selection and metadata system prompts
+  guides/         packaged setup notes displayed by the local app
 examples/         full config, manifests, music catalog, demo and schedulers
 tests/            offline unit/mocked tests and real synthetic-media tests
 docs/             current primary-source policy/permission notes
@@ -305,11 +322,11 @@ prepared/         generated clips and reviewable artifacts (ignored)
 secrets/          owner OAuth credentials (ignored)
 ```
 
-Implemented: the local preparation path, discovery/monitoring, gated trend formulas, caption formats, three framing modes, optional catalog music and ducking, metadata/credits, review states, checksum caches, OS lock, finite job retries, UTC slot reservation, opt-in OAuth/resumable upload and status polling. Tests run offline with real FFmpeg where available.
+Implemented: the local browser studio and preparation path, authorized direct-link/Twitch imports, platform references with attached originals, discovery/monitoring, gated trend formulas, caption formats, three framing modes, optional catalog music and ducking, metadata/credits, review states, checksum caches, OS lock, finite job retries, UTC slot reservation, opt-in YouTube OAuth/resumable upload, Instagram Reels/TikTok API publishing and status checks. Tests run offline with real FFmpeg where available; network integrations use mocks.
 
 Optional extensions: face tracking/speaker association, richer slot calendars, two-pass loudness mastering, final-edit narration, automatic substantive editorial augmentation, multi-worker transactional claims and alerts.
 
-Remaining deployment work: install your dependencies/models; configure niche/channel/paths; supply actual rights evidence and media; review model output; prepare a licensed music catalog if desired; perform owner OAuth and set channel/declarations/privacy; obtain any required analytics approval; test on your hardware and account before enabling unattended publishing. Authorized caption downloads and manual upload-record reconciliation are documented integration tasks, not implemented automation.
+Remaining deployment work: install your dependencies/models; configure niche/accounts/paths; supply actual rights evidence and media; review model output; prepare a licensed music catalog if desired; perform YouTube owner OAuth and set declarations/privacy; obtain eligible platform app permissions and private tokens for optional Twitch/Instagram/TikTok features; obtain any required analytics approval; test on your hardware and authorized accounts. Instagram/TikTok/Twitch app registration, OAuth token acquisition/renewal and provider approval are external setup steps. Authorized caption downloads and manual upload-record reconciliation are documented integration tasks, not implemented automation.
 
 ## Verification
 
@@ -317,4 +334,4 @@ Remaining deployment work: install your dependencies/models; configure niche/cha
 python -m pytest -q
 ```
 
-Tests use no real API credentials or inference. FFmpeg tests explicitly skip if the binaries are missing; to point to a portable build set `CLIPFORGE_TEST_FFMPEG` and `CLIPFORGE_TEST_FFPROBE`. Timestamp, subtitle-rebasing, schedule, output/decode/music, repeat-run, and interrupted-upload checks are included. [VERIFICATION.md](VERIFICATION.md) distinguishes executed checks from supplied/unexecuted integrations. Current platform claims were checked against primary documentation on **October 18, 2026**; see the linked notes and recheck before enabling a production account.
+Tests use no real API credentials or inference. FFmpeg tests explicitly skip if the binaries are missing; to point to a portable build set `CLIPFORGE_TEST_FFMPEG` and `CLIPFORGE_TEST_FFPROBE`. Timestamp, subtitle-rebasing, schedule, output/decode/music, repeat-run, and interrupted-upload checks are included. [VERIFICATION.md](VERIFICATION.md) distinguishes executed checks from supplied/unexecuted integrations. The original YouTube/AI platform notes were checked on **October 18, 2026**; new link/social API sources were checked on **October 19, 2026**. See the linked notes and recheck before enabling a production account. No live Twitch downloads or Instagram/TikTok publication are claimed by these documentation updates.

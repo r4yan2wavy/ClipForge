@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import html
 import mimetypes
 import re
 import secrets
@@ -183,6 +184,8 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             self._json(self.service.library())
         elif path == "/api/health":
             self._json(self.service.health())
+        elif match := re.fullmatch(r"/api/social/(instagram|tiktok)/creator", path):
+            self._json(self.service.social_creator(match[1]))
         elif match := re.fullmatch(rf"/api/clips/({ENTITY})", path):
             self._json(self.service.get_clip(match[1]))
         elif match := re.fullmatch(rf"/media/(source|clip|caption)/({ENTITY})", path):
@@ -190,6 +193,26 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             self._file(media, name if query.get("download") == ["1"] or match[1] == "caption" else None, ranges=True)
         elif path.startswith("/api/") or path.startswith("/media/"):
             raise WebError("This page or media item could not be found.", 404)
+        elif path in {"/guide/links", "/guide/social"}:
+            name = "link-import.md" if path.endswith("links") else "social-publishing.md"
+            document = Path(__file__).with_name("guides") / name
+            if not document.is_file():
+                document = STATIC_DIR.parent.parent / "docs" / name
+            if not document.is_file():
+                raise WebError("This setup guide is missing. Use the full GitHub download.", 404)
+            text = document.read_text(encoding="utf-8")
+            page = ('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>ClipForge setup guide</title><style>body{max-width:900px;margin:32px auto;padding:0 20px;font:16px/1.6 system-ui;color:#182334}'
+                    'pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}a{color:#245bc9}</style>'
+                    '<a href="/">← Back to ClipForge Studio</a> · <a rel="noreferrer noopener" target="_blank" href="https://github.com/r4yan2wavy/ClipForge/blob/main/docs/'
+                    + name + '">Open linked guide on GitHub</a><pre>' + html.escape(text) + '</pre></html>').encode("utf-8")
+            self.send_response(200)
+            self._headers()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(page)
         else:
             relative = "index.html" if path in {"", "/"} else path.lstrip("/")
             target = (STATIC_DIR / relative).resolve()
@@ -206,6 +229,13 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             if set(data) != {"path"} or not isinstance(data["path"], str) or not data["path"].strip() or len(data["path"]) > 4096:
                 raise WebError("Enter the full path to an existing local video.")
             self._json(self.service.register_source(data["path"]), 201)
+        elif path == "/api/links":
+            self._json(self.service.import_link(data), 202)
+        elif match := re.fullmatch(rf"/api/links/({ENTITY})/(attach|retry)", path):
+            result = self.service.attach_link(match[1], data) if match[2] == "attach" else self.service.retry_link(match[1], data)
+            self._json(result, 202 if match[2] == "retry" else 200)
+        elif match := re.fullmatch(rf"/api/clips/({ENTITY})/social/(instagram|tiktok)/(publish|refresh|finish)", path):
+            self._json(self.service.social_action(match[1], match[2], match[3], data), 202)
         elif path == "/api/demo":
             if data:
                 raise WebError("The sample request does not accept options.")

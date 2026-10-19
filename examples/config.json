@@ -88,6 +88,22 @@
     "request_timeout_s": 60,
     "poll_every_minutes": 15
   },
+  "instagram": {
+    "enabled": false,
+    "credentials_file": "secrets/instagram.json",
+    "target_account_id": "",
+    "api_version": "v25.0",
+    "request_timeout_s": 60
+  },
+  "tiktok": {
+    "enabled": false,
+    "credentials_file": "secrets/tiktok.json",
+    "request_timeout_s": 60
+  },
+  "twitch": {
+    "credentials_file": "secrets/twitch.json",
+    "request_timeout_s": 60
+  },
   "timezone": "America/New_York",
   "max_job_attempts": 3
 }

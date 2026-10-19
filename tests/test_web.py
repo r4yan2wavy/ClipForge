@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from clipforge.common import Settings, atomic_json, iso_now, sha256_file
+from clipforge.common import Settings, atomic_json, iso_now, sha256_file, stable_id
 from clipforge.web import ClipForgeHTTPServer, parse_range
 from clipforge.web_service import WebError, WebService
 
@@ -263,6 +263,17 @@ class StudioTest(unittest.TestCase):
             self.assertEqual(request("GET", "/api/bootstrap", Origin="https://attacker.example")[0], 403)
             self.assertEqual(request("POST", "/api/demo", "{}", **{"Content-Type": "application/json"})[0], 403)
             auth = {"X-ClipForge-Token": token, "Content-Type": "application/json", "Origin": f"http://localhost:{port}"}
+            status, _, body = request("POST", "/api/links", json.dumps({"url": "https://www.youtube.com/watch?v=abcdefghijk", "rights_confirmed": True}), **auth)
+            self.assertEqual(status, 202)
+            link = json.loads(body)["link"]
+            self.assertEqual(link["state"], "needs_file")
+            status, _, body = request("POST", f"/api/links/{link['id']}/attach", json.dumps({"source_id": source["id"]}), **auth)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["link"]["state"], "ready")
+            self.assertEqual(request("GET", "/guide/links")[0], 200)
+            self.assertEqual(request("GET", "/guide/social")[0], 200)
+            self.assertEqual(request("GET", "/api/social/instagram/creator")[0], 409)
+            self.assertEqual(request("POST", "/api/clips/missing/social/tiktok/publish", "{}", **auth)[0], 400)
             self.assertEqual(request("POST", "/api/demo", "{}", **dict(auth, Origin="null"))[0], 403)
             self.assertEqual(request("POST", "/api/settings", '{"brain":{"max_clips":NaN}}', **auth)[0], 400)
             self.assertEqual(request("POST", "/api/settings", "{}", **dict(auth, **{"Content-Length": "70000"}))[0], 413)
@@ -284,6 +295,99 @@ class StudioTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_platform_links_are_references_and_attached_file_keeps_provenance(self):
+        for url, platform in (("https://www.youtube.com/watch?v=abcdefghijk", "youtube"),
+                              ("https://kick.com/my-channel/videos/recording", "kick"),
+                              ("https://www.instagram.com/reel/ABC123/", "instagram"),
+                              ("https://www.tiktok.com/@creator/video/123456", "tiktok")):
+            result = self.service.import_link({"url": url, "rights_confirmed": True})
+            self.assertEqual(result["link"]["platform"], platform)
+            self.assertEqual(result["link"]["state"], "needs_file")
+            self.assertNotIn("job", result)
+            self.assertNotIn("private_url", result["link"])
+        source = self.source()
+        link = self.service.library()["links"][0]
+        attached = self.service.attach_link(link["id"], {"source_id": source["id"]})
+        self.assertEqual(attached["link"]["state"], "ready")
+        self.assertEqual(attached["source"]["source_url"], link["url"])
+        self.assertEqual(attached["source"]["id"], source["id"])
+        with self.assertRaises(WebError):
+            self.service.import_link({"url": "https://example.com/a.mp4", "rights_confirmed": False})
+
+    def test_direct_link_import_downloads_then_registers_and_hides_signed_query(self):
+        def download(url, target, **kwargs):
+            self.assertIn("signature=private-signed-query", url)
+            target.write_bytes(b"0123456789")
+            return target
+        with patch("clipforge.link_import.download_video", side_effect=download), patch("clipforge.web_service.run_command", return_value=SimpleNamespace(stdout=json.dumps(PROBE))):
+            result = self.service.import_link({"url": "https://media.example.com/owned.mp4?signature=private-signed-query", "rights_confirmed": True})
+            job = self.wait_job(result["job"]["id"])
+        self.assertEqual(job["state"], "completed", job)
+        library = self.service.library()
+        self.assertEqual(library["links"][0]["state"], "ready")
+        self.assertEqual(len(library["sources"]), 1)
+        self.assertNotIn("private-signed-query", json.dumps(library))
+
+    def test_failed_link_import_cleans_up_and_records_explicit_retry(self):
+        from clipforge.link_import import LinkError
+        def download(url, target, **kwargs):
+            target.write_bytes(b"incomplete")
+            raise LinkError("The transfer was interrupted.")
+        with patch("clipforge.link_import.download_video", side_effect=download):
+            result = self.service.import_link({"url": "https://media.example.com/owned.mp4", "rights_confirmed": True})
+            job = self.wait_job(result["job"]["id"])
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(self.service.library()["links"][0]["state"], "failed")
+        self.assertEqual(list((self.service.data_dir / "sources").iterdir()), [])
+
+    def test_social_queue_preserves_review_and_blocks_duplicate_requests(self):
+        from clipforge.social_publish import schema
+        clip = self.render_fixture()
+        self.service.approve(clip["id"], {"reviewed": True})
+        self.service.settings.instagram.enabled = True
+        self.service.settings.instagram.target_account_id = "123"
+        atomic_json(self.root / "instagram.json", {"access_token": "test-only", "account_id": "123", "login_type": "facebook_business"})
+        self.service.settings.instagram.credentials_file = str(self.root / "instagram.json")
+        options = {"confirmed": True, "caption": "A reviewed caption", "share_to_feed": False, "account_id": "123"}
+        # Keep queued work deterministic while verifying the server-side duplicate guard.
+        with patch.object(self.service.pending, "put"):
+            result = self.service.social_action(clip["id"], "instagram", "publish", options)
+            self.assertEqual(result["job"]["platform"], "instagram")
+            self.assertEqual(result["job"]["target_clip_id"], clip["id"])
+            with self.assertRaises(WebError):
+                self.service.social_action(clip["id"], "instagram", "publish", options)
+        with self.service.db() as db:
+            job = self.service._job(db, result["job"]["id"])
+            self.service.edit_clip(clip["id"], {"title": "Edited after consent", "description": "Changed", "tags": []})
+            self.service.approve(clip["id"], {"reviewed": True})
+            with patch("clipforge.social_publish.publish") as publish:
+                with self.assertRaises(WebError):
+                    self.service._social_task(db, job)
+                publish.assert_not_called()
+
+    def test_social_intent_freezes_metadata_but_allows_youtube_cross_post_without_artifact_changes(self):
+        clip = self.render_fixture()
+        self.service.approve(clip["id"], {"reviewed": True})
+        with self.service.db() as db:
+            folder, artifact = self.service._artifact(db, clip["id"])
+            before = (folder / "artifact.json").read_bytes()
+            db.conn.execute("""INSERT INTO social_publications(clip_id,platform,target_account_id,artifact_hash,
+                artifact_json,options_json,video_path,video_sha256,total_bytes,state,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (clip["id"], "instagram", "123", stable_id(artifact),
+                    json.dumps(artifact), "{}", artifact["video_path"], artifact["render_sha256"],
+                    Path(artifact["video_path"]).stat().st_size, "processing", iso_now(), iso_now()))
+        self.assertTrue(self.service.get_clip(clip["id"])["submitted"])
+        with self.assertRaises(WebError):
+            self.service.edit_clip(clip["id"], {"title": "Changed", "description": "Changed", "tags": []})
+        self.service.settings.upload.enabled = True
+        self.service.settings.upload.target_channel_id = "youtube-channel"
+        with patch.object(self.service, "_enqueue", side_effect=lambda db, kind, payload, **kw: payload):
+            payload = self.service.publish(clip["id"], {"confirmed": True, "made_for_kids": False, "contains_synthetic_media": False, "schedule": None})
+        with self.service.db() as db, patch("clipforge.upload.upload_prepared", return_value={"state": "upload_accepted"}) as upload:
+            self.service._youtube_task(db, {"id": "cross-post", "kind": "publish", "payload": payload})
+            self.assertEqual(upload.call_args.kwargs["publication_options"]["made_for_kids"], False)
+        self.assertEqual((folder / "artifact.json").read_bytes(), before)
 
     def test_range_parser(self):
         self.assertEqual(parse_range("bytes=-4", 10), (6, 9))

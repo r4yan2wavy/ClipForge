@@ -1,4 +1,4 @@
-/* ClipForge's local browser interface. No external services or build step. */
+/* Buildless local interface. Platform connections go through the local server. */
 "use strict";
 
 const icons = {
@@ -17,6 +17,11 @@ const icons = {
   film: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.2"/>',
   youtube: '<rect x="3" y="5" width="18" height="14" rx="4"/><path d="m10 9 5 3-5 3V9Z"/>',
+  instagram: '<rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><path d="M17.5 6.5h.1"/>',
+  tiktok: '<path d="M14 3v12a5 5 0 1 1-4-4.9V15a1.5 1.5 0 1 0 1 1.4V3h3Zm0 0c.5 3 2.2 4.4 5 4.8v3c-2.1-.2-3.7-1-5-2.1"/>',
+  twitch: '<path d="M5 3h16v12l-5 5h-4l-3 3v-3H5V3Zm0 0L2 6v14h5M10 7v6M16 7v6"/>',
+  link: '<path d="m9 15 6-6M7 14l-2 2a3.5 3.5 0 0 0 5 5l4-4a3.5 3.5 0 0 0 0-5M10 12a3.5 3.5 0 0 1 0-5l4-4a3.5 3.5 0 0 1 5 5l-2 2"/>',
+  upload: '<path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
   mountain: '<path d="m2 20 7-13 5 9 4-6 4 10H2ZM6 13l3 2 2-2"/><circle cx="17" cy="5" r="2"/>',
@@ -32,7 +37,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
 const icon = (name, className = "") => `<svg viewBox="0 0 ${name === "brand" ? "32 35" : "24 24"}" aria-hidden="true" class="${esc(className)}">${icons[name] || icons.film}</svg>`;
-const state = {token: "", settings: {}, capabilities: {}, sources: [], jobs: [], clips: [], sourceId: null, clipId: null, connected: false, sourceSignature: "", clipSignature: "", jobSignature: "", uploading: false, metadataDirty: false};
+const state = {token: "", settings: {}, capabilities: {}, sources: [], jobs: [], clips: [], links: [], sourceId: null, clipId: null, attachLinkId: null, attachPendingUpload: false, socialPlatform: null, socialCreator: null, connected: false, sourceSignature: "", clipSignature: "", jobSignature: "", linkSignature: "", uploading: false, metadataDirty: false};
 let pollTimer;
 let healthBusy = false;
 
@@ -85,6 +90,13 @@ function mediaUrl(value, expectedKind) {
     return url.origin === location.origin && url.pathname.startsWith(`/media/${expectedKind}/`) ? url.pathname + url.search : "";
   } catch { return ""; }
 }
+
+function externalUrl(value) {
+  try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password ? url.href : ""; }
+  catch { return ""; }
+}
+
+function platformName(platform) { return {instagram: "Instagram", tiktok: "TikTok", youtube: "YouTube", twitch: "Twitch", kick: "Kick", direct: "Direct video"}[platform] || "Video link"; }
 
 function duration(value, precise = false) {
   const seconds = Math.max(0, Number(value) || 0);
@@ -143,6 +155,35 @@ function renderSources() {
   }).join("");
 }
 
+function renderLinks() {
+  $("#link-count").textContent = state.links.length;
+  if (!state.links.length) { $("#link-list").innerHTML = emptyState("link", "Bring a link along.", "Paste a direct video or save a source page and attach your authorized file."); return; }
+  $("#link-list").innerHTML = state.links.map((link) => {
+    const url = externalUrl(link.url);
+    const ready = link.state === "ready" && state.sources.some((source) => source.id === link.source_id);
+    const importing = link.state === "importing";
+    return `<article class="link-card"><span class="link-platform-icon">${icon(icons[link.platform] ? link.platform : "link")}</span><div class="link-card-main"><div class="link-card-title"><strong>${esc(platformName(link.platform))}</strong><span class="badge${ready ? " green" : importing ? " blue" : ""}">${ready ? "Video attached" : importing ? "Importing" : link.state === "failed" ? "Import needs attention" : "Video file needed"}</span></div><p class="link-url">${esc(link.url)}</p><p class="link-message">${esc(link.message || (ready ? "Your video is ready to clip." : "Attach an authorized local video file to use this source."))}</p><div class="link-card-actions">${url ? `<a class="text-button" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open original ↗</a>` : ""}${ready ? `<button class="text-button" type="button" data-create="${esc(link.source_id)}">Create clip ↗</button>` : !importing ? `<button class="button subtle small" type="button" data-attach="${esc(link.id)}">${icon("folder")} Attach a video</button>` : ""}${link.state === "failed" && link.can_download ? `<button class="text-button" type="button" data-link-retry="${esc(link.id)}">Retry import</button>` : ""}</div></div></article>`;
+  }).join("");
+}
+
+function openAttach(linkId) {
+  const link = state.links.find((item) => item.id === linkId);
+  if (!link) return;
+  state.attachLinkId = linkId;
+  $("#attach-link-name").textContent = `Attach the matching video file for ${link.url}`;
+  $("#attach-source-select").innerHTML = '<option value="">Choose a source…</option>' + state.sources.filter((source) => !sampleSource(source)).map((source) => `<option value="${esc(source.id)}">${esc(source.name)} · ${esc(duration(source.duration_s))}</option>`).join("");
+  $("#attach-source-select").disabled = !state.sources.some((source) => !sampleSource(source));
+  $("#attach-submit").disabled = $("#attach-source-select").disabled;
+  clearError("#attach-error");
+  $("#attach-dialog").showModal();
+}
+
+async function attachSource(sourceId) {
+  if (!state.attachLinkId) return;
+  await api(`/api/links/${encodeURIComponent(state.attachLinkId)}/attach`, {source_id: sourceId});
+  state.attachLinkId = null;
+}
+
 function jobLabel(job) {
   const status = String(job.state).toLowerCase();
   if (status === "completed") return "Complete";
@@ -179,7 +220,7 @@ function renderJobs() {
 }
 
 function clipBadge(clip) {
-  if (clip.submitted) return '<span class="badge blue">Sent to YouTube</span>';
+  if (clip.submitted) return '<span class="badge blue">Publishing started</span>';
   if (isApproved(clip)) return `<span class="badge green">${icon("check")} Approved</span>`;
   return '<span class="badge">Needs review</span>';
 }
@@ -211,6 +252,7 @@ function renderHealth() {
   $("#setup-summary").textContent = renderReady ? (aiReady ? "Your studio is ready" : "Ready to create manual clips") : "Let's get your studio ready";
   $("#setup-detail").textContent = renderReady ? (aiReady ? "Video tools and local AI are connected." : "Add local AI in Settings whenever you're ready.") : "Set up FFmpeg and FFprobe in Settings.";
   $("#ai-readiness").textContent = aiReady ? "Your local AI tools are ready." : "Local AI setup is incomplete. Check Whisper and Ollama in Settings before starting.";
+  ["instagram", "tiktok", "twitch"].forEach((platform) => { const info = capabilities[platform]; $("#" + platform + "-setup-status").textContent = info?.message || "Save your settings, then check setup to inspect the credential file."; });
 }
 
 function fillSettings() {
@@ -243,12 +285,15 @@ function applyLibrary(data) {
   state.sources = Array.isArray(data.sources) ? data.sources : [];
   state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
   state.clips = Array.isArray(data.clips) ? data.clips : [];
+  state.links = Array.isArray(data.links) ? data.links : [];
   const sourceSignature = JSON.stringify(state.sources);
   const jobSignature = JSON.stringify(state.jobs);
   const clipSignature = JSON.stringify(state.clips);
+  const linkSignature = JSON.stringify(state.links);
   if (sourceSignature !== state.sourceSignature) { state.sourceSignature = sourceSignature; renderSources(); }
-  if (jobSignature !== state.jobSignature) { state.jobSignature = jobSignature; renderJobs(); }
+  if (jobSignature !== state.jobSignature) { state.jobSignature = jobSignature; renderJobs(); if ($("#review-dialog").open && currentClip()) updateReviewState(); }
   if (clipSignature !== state.clipSignature) { state.clipSignature = clipSignature; renderClips(); if ($("#review-dialog").open && currentClip()) updateReviewState(); }
+  if (linkSignature !== state.linkSignature) { state.linkSignature = linkSignature; renderLinks(); }
 }
 
 async function refreshLibrary() {
@@ -278,6 +323,7 @@ function setUploadBusy(busy) {
   $("#choose-video").disabled = busy;
   $("#try-demo").disabled = busy;
   $("#import-path").disabled = busy;
+  $("#paste-link").disabled = busy;
   $("#upload-progress").hidden = !busy;
 }
 
@@ -306,6 +352,8 @@ function uploadVideo(file) {
     try { data = JSON.parse(request.responseText); } catch { toast("The video could not be imported. Check the ClipForge terminal.", true); return; }
     if (request.status < 200 || request.status >= 300) { toast(data.error || "The video could not be imported.", true); return; }
     const source = data.source || data;
+    try { if (state.attachLinkId) await attachSource(source.id); }
+    catch (error) { toast(`The video was imported, but its link could not be attached: ${error.message}`, true); }
     await refreshLibrary();
     toast("Video imported. Let's find your moment.");
     if (source.id) openCreate(source.id);
@@ -377,6 +425,7 @@ function updateReviewState() {
   if (!clip) return;
   $("#review-status").innerHTML = state.metadataDirty ? '<span class="badge">Unsaved details · save before approving</span>' : clipBadge(clip);
   const locked = Boolean(clip.submitted);
+  const youtubeSubmitted = Boolean(clip.publication);
   $$("input,textarea,button", $("#metadata-form")).forEach((input) => { input.disabled = locked; });
   $("#approval-panel").hidden = (isApproved(clip) && !state.metadataDirty) || locked;
   $("#approve-clip").disabled = !$("#review-confirm").checked || locked || state.metadataDirty;
@@ -386,16 +435,104 @@ function updateReviewState() {
   let publicationText = "Connect your channel in Settings to publish from here.";
   if (state.metadataDirty) publicationText = "Save your updated details, then review and approve the clip before publishing.";
   else if (clip.is_demo) publicationText = "The synthetic sample is for trying the studio. Publishing this sample is disabled.";
-  else if (locked) {
+  else if (youtubeSubmitted) {
     const status = typeof publication === "object" && publication ? String(publication.state || publication.status || "submitted").replace(/_/g, " ") : "submitted";
     publicationText = `YouTube: ${status}. ${clip.resume_message || "Submitted clips are locked. Refresh publishing status in Settings for updates."}`;
   } else if (!isApproved(clip)) publicationText = "Watch the clip and approve it before publishing.";
   else if (state.settings.upload?.enabled) publicationText = `Upload to ${state.settings.upload.target_channel_id || "your configured channel"} with ${state.settings.upload.privacy_status || "private"} visibility. You'll confirm the audience and disclosure first.`;
   $("#publication-summary").textContent = publicationText;
-  publish.disabled = locked || clip.is_demo || !isApproved(clip) || !state.settings.upload?.enabled || state.metadataDirty;
-  publish.hidden = locked;
+  publish.disabled = youtubeSubmitted || clip.is_demo || !isApproved(clip) || !state.settings.upload?.enabled || state.metadataDirty;
+  publish.hidden = youtubeSubmitted;
   resume.hidden = !clip.can_resume;
   resume.disabled = !clip.can_resume || !state.settings.upload?.enabled;
+  renderSocialPanels(clip);
+}
+
+function renderSocialPanels(clip) {
+  $("#social-publication-panels").innerHTML = ["instagram", "tiktok"].map((platform) => {
+    const record = clip.social_publications?.[platform];
+    const name = platformName(platform);
+    const pending = activeJobs().find((job) => job.platform === platform && job.target_clip_id === clip.id);
+    let message = "Enable publishing and configure your private credentials file in Settings.";
+    if (pending) message = `${name} has an action in progress. Follow its result in the workshop before making another request.`;
+    else if (record) message = record.message || `Status: ${String(record.state || "submitted").replace(/_/g, " ")}. Check status before taking further action.`;
+    else if (clip.is_demo) message = "Publishing the synthetic setup sample is disabled. Use your own authorized video.";
+    else if (state.metadataDirty) message = "Save your clip details and approve the updated clip before publishing.";
+    else if (!isApproved(clip)) message = "Review and approve this clip before publishing.";
+    else if (state.settings[platform]?.enabled) message = state.capabilities[platform]?.ok ? "Check the live account and publishing options, then confirm your post." : (state.capabilities[platform]?.message || "Check platform setup in Settings before publishing.");
+    const allowed = !record && !pending && !clip.is_demo && isApproved(clip) && !state.metadataDirty && state.settings[platform]?.enabled && state.capabilities[platform]?.ok;
+    return `<section class="publication-panel"><div class="publication-heading">${icon(platform)}<strong>${esc(name)}</strong>${record ? `<span class="badge blue">${esc(String(record.state || "submitted").replace(/_/g, " "))}</span>` : ""}</div><p>${esc(message)}</p>${record ? `<div class="button-row"><button class="button subtle small" type="button" data-social-refresh="${esc(platform)}"${pending ? " disabled" : ""}>${icon("refresh")} Check status</button>${platform === "instagram" && record.can_finish ? `<button class="button primary small" type="button" data-social-finish="instagram"${pending ? " disabled" : ""}>Finish Instagram publishing</button>` : ""}</div>` : `<button class="button subtle small" type="button" data-social-publish="${esc(platform)}"${allowed ? "" : " disabled"}>${pending ? "Request in progress" : `Publish to ${esc(name)}`} <span aria-hidden="true">↗</span></button>`}</section>`;
+  }).join("");
+}
+
+function updateSocialDisclosures() {
+  const fields = $("#social-form").elements;
+  const paid = fields.brand_content.value === "true";
+  const own = fields.brand_organic.value === "true";
+  const message = paid && own ? "Your video will be labeled Paid partnership and Promotional content." : paid ? "Your video will be labeled Paid partnership. Paid partnerships cannot use private (Only me) visibility." : own ? "Your video will be labeled Promotional content." : "Choose both commercial content disclosures for this video.";
+  $("#brand-disclosure-message").textContent = message;
+  $("#music-consent-copy").innerHTML = `By posting, I agree to TikTok's <a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target="_blank" rel="noopener noreferrer">Music Usage Confirmation</a>${paid ? ' and <a href="https://www.tiktok.com/legal/page/global/bc-policy/en" target="_blank" rel="noopener noreferrer">Branded Content Policy</a>' : ""}.`;
+  fields.music_usage_confirmed.checked = false;
+}
+
+async function openSocial(platform) {
+  const clip = currentClip();
+  if (!clip || clip.is_demo || !isApproved(clip) || state.metadataDirty || clip.social_publications?.[platform]) return;
+  state.socialPlatform = platform;
+  state.socialCreator = null;
+  const name = platformName(platform);
+  const form = $("#social-form");
+  form.reset();
+  clearError("#social-error");
+  $("#social-dialog-title").textContent = `Publish to ${name}`;
+  $("#social-creator-icon").innerHTML = icon(platform);
+  $("#social-creator-name").textContent = "Checking creator account…";
+  $("#social-creator-message").textContent = `Fetching your account and publishing options from ${name}.`;
+  $("#social-loading").hidden = false;
+  $("#social-fields").hidden = true;
+  $("#social-fields").disabled = true;
+  $("#social-submit").disabled = true;
+  $("#social-submit").innerHTML = `${icon(platform)} Publish to ${esc(name)}`;
+  $("#instagram-options").hidden = platform !== "instagram";
+  $("#tiktok-options").hidden = platform !== "tiktok";
+  form.elements.caption.value = (clip.description || clip.title || "").slice(0, 2200).replace(/[\uD800-\uDBFF]$/, "");
+  $("#social-caption-count").textContent = `${form.elements.caption.value.length} / 2200`;
+  $$("input,select", $("#tiktok-options")).forEach((input) => { input.disabled = platform !== "tiktok"; input.required = platform === "tiktok" && (input.tagName === "SELECT" || input.name === "music_usage_confirmed"); });
+  form.elements.share_to_feed.disabled = platform !== "instagram";
+  $("#social-confirm-copy").textContent = `I reviewed the full clip and authorize posting it to the ${name} account shown above.`;
+  updateSocialDisclosures();
+  $("#social-dialog").showModal();
+  try {
+    const data = await api(`/api/social/${platform}/creator`);
+    if (!$("#social-dialog").open || state.socialPlatform !== platform) return;
+    const creator = data.creator || data;
+    state.socialCreator = creator;
+    const identity = [creator.nickname, creator.username ? `@${String(creator.username).replace(/^@/, "")}` : "", creator.account_id ? `ID ${creator.account_id}` : ""].filter(Boolean).join(" · ");
+    $("#social-creator-name").textContent = identity || `${name} creator account`;
+    $("#social-creator-message").textContent = creator.message || "Account checked. Review the options and confirm when you're ready.";
+    if (platform === "tiktok") {
+      const options = Array.isArray(creator.privacy_level_options) ? creator.privacy_level_options.filter((value) => typeof value === "string") : [];
+      form.elements.privacy_level.innerHTML = '<option value="">Choose a privacy option…</option>' + options.map((value) => `<option value="${esc(value)}">${esc({PUBLIC_TO_EVERYONE: "Everyone", MUTUAL_FOLLOW_FRIENDS: "Friends · mutual followers", FOLLOWER_OF_CREATOR: "Followers", SELF_ONLY: "Only me · private"}[value] || value.replace(/_/g, " "))}</option>`).join("");
+      ["comment", "duet", "stitch"].forEach((kind) => { form.elements[`allow_${kind}`].disabled = Boolean(creator[`${kind}_disabled`]); form.elements[`allow_${kind}`].checked = false; $(`#${kind}-restriction`).hidden = !creator[`${kind}_disabled`]; });
+      if (!options.length) throw new Error("TikTok returned no publishing privacy options for this account. Check platform eligibility and app authorization.");
+      if (Number(creator.max_video_post_duration_sec) > 0 && Number(clip.duration_s) > Number(creator.max_video_post_duration_sec)) throw new Error(`This creator can post videos up to ${creator.max_video_post_duration_sec} seconds. Create a shorter clip before publishing.`);
+      if (creator.client_audited === false) $("#social-creator-message").textContent += " This client is unaudited; only private posting is available, subject to TikTok's account restrictions.";
+    }
+    $("#social-fields").hidden = false;
+    $("#social-fields").disabled = false;
+    $("#social-submit").disabled = false;
+  } catch (error) { showError("#social-error", error); $("#social-creator-name").textContent = "Publishing setup needs attention"; $("#social-creator-message").textContent = "Complete setup and account authorization before posting."; }
+  finally { $("#social-loading").hidden = true; }
+}
+
+async function refreshSocial(platform, button) {
+  const clip = currentClip();
+  if (!clip) return;
+  const restore = startAction(button, "Checking…");
+  clearError("#review-error");
+  try { await api(`/api/clips/${encodeURIComponent(clip.id)}/social/${platform}/refresh`, {}); await refreshLibrary(); updateReviewState(); scheduleFastPoll(); toast(`${platformName(platform)} status check requested.`); }
+  catch (error) { showError("#review-error", error); }
+  finally { restore(); }
 }
 
 function openReview(clipId) {
@@ -454,14 +591,15 @@ function bindEvents() {
   window.addEventListener("hashchange", navigate);
   $("#health-shortcut").addEventListener("click", () => { location.hash = "settings"; });
   $("#open-setup").addEventListener("click", () => { location.hash = "settings"; });
-  $("#choose-video").addEventListener("click", () => $("#video-file").click());
+  $("#choose-video").addEventListener("click", () => { state.attachLinkId = null; state.attachPendingUpload = false; $("#video-file").click(); });
+  $("#video-file").addEventListener("cancel", () => { state.attachLinkId = null; state.attachPendingUpload = false; });
   $("#video-file").addEventListener("change", (event) => uploadVideo(event.target.files[0]));
   const dropzone = $("#dropzone");
   let dragDepth = 0;
   dropzone.addEventListener("dragenter", (event) => { event.preventDefault(); dragDepth++; dropzone.classList.add("drag-over"); });
   dropzone.addEventListener("dragover", (event) => { event.preventDefault(); event.dataTransfer.dropEffect = state.uploading ? "none" : "copy"; });
   dropzone.addEventListener("dragleave", (event) => { event.preventDefault(); dragDepth--; if (!dragDepth) dropzone.classList.remove("drag-over"); });
-  dropzone.addEventListener("drop", (event) => { event.preventDefault(); dragDepth = 0; dropzone.classList.remove("drag-over"); if (event.dataTransfer.files.length > 1) toast("We'll start with the first video. You can add more afterward."); uploadVideo(event.dataTransfer.files[0]); });
+  dropzone.addEventListener("drop", (event) => { event.preventDefault(); dragDepth = 0; dropzone.classList.remove("drag-over"); state.attachLinkId = null; state.attachPendingUpload = false; if (event.dataTransfer.files.length > 1) toast("We'll start with the first video. You can add more afterward."); uploadVideo(event.dataTransfer.files[0]); });
   window.addEventListener("dragover", (event) => event.preventDefault());
   window.addEventListener("drop", (event) => event.preventDefault());
   $("#try-demo").addEventListener("click", async (event) => {
@@ -471,6 +609,40 @@ function bindEvents() {
     finally { restore(); }
   });
   $("#source-list").addEventListener("click", (event) => { const button = event.target.closest("[data-create]"); if (button) openCreate(button.dataset.create); });
+  $("#paste-link").addEventListener("click", () => { $("#link-form").reset(); clearError("#link-error"); $("#link-dialog").showModal(); });
+  $("#link-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    clearError("#link-error");
+    const url = externalUrl(event.currentTarget.elements.url.value.trim());
+    if (!url) { showError("#link-error", "Enter a complete HTTPS video or page URL without a username or password."); return; }
+    const restore = startAction($("#link-submit"), "Adding link…");
+    try { const data = await api("/api/links", {url, rights_confirmed: event.currentTarget.elements.rights_confirmed.checked}); $("#link-dialog").close(); await refreshLibrary(); scheduleFastPoll(); toast(data.link?.state === "importing" ? "Video import queued. Follow its progress in Linked videos." : "Link saved. Check its status in Linked videos and attach a file if needed."); }
+    catch (error) { showError("#link-error", error); }
+    finally { restore(); }
+  });
+  $("#link-list").addEventListener("click", async (event) => {
+    const create = event.target.closest("[data-create]");
+    const attach = event.target.closest("[data-attach]");
+    const retry = event.target.closest("[data-link-retry]");
+    if (create) openCreate(create.dataset.create);
+    if (attach) openAttach(attach.dataset.attach);
+    if (retry) {
+      const restore = startAction(retry, "Queuing…");
+      try { await api(`/api/links/${encodeURIComponent(retry.dataset.linkRetry)}/retry`, {}); await refreshLibrary(); scheduleFastPoll(); toast("Link import queued again."); }
+      catch (error) { toast(error.message, true); }
+      finally { restore(); }
+    }
+  });
+  $("#attach-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    clearError("#attach-error");
+    const sourceId = event.currentTarget.elements.source_id.value;
+    const restore = startAction($("#attach-submit"), "Attaching…");
+    try { await attachSource(sourceId); $("#attach-dialog").close(); await refreshLibrary(); toast("Video attached. You can now create clips from this source."); }
+    catch (error) { showError("#attach-error", error); }
+    finally { restore(); }
+  });
+  $("#attach-upload").addEventListener("click", () => { state.attachPendingUpload = true; $("#attach-dialog").close(); $("#video-file").click(); });
   $("#job-list").addEventListener("click", (event) => { const retry = event.target.closest("[data-retry]"); const review = event.target.closest("[data-review]"); if (retry) retryJob(retry.dataset.retry, retry); if (review) openReview(review.dataset.review); });
   $("#clip-grid").addEventListener("click", (event) => { const button = event.target.closest("[data-review]"); if (button) openReview(button.dataset.review); });
   $("#clip-filter").addEventListener("change", renderClips);
@@ -526,6 +698,49 @@ function bindEvents() {
     finally { restore(); updateReviewState(); }
   });
   $("#review-confirm").addEventListener("change", updateReviewState);
+  $("#social-publication-panels").addEventListener("click", async (event) => {
+    const publish = event.target.closest("[data-social-publish]");
+    const refresh = event.target.closest("[data-social-refresh]");
+    const finish = event.target.closest("[data-social-finish]");
+    if (publish) openSocial(publish.dataset.socialPublish);
+    if (refresh) refreshSocial(refresh.dataset.socialRefresh, refresh);
+    if (finish) {
+      const clip = currentClip();
+      const record = clip?.social_publications?.instagram;
+      if (!record?.can_finish) return;
+      if (!window.confirm(`Finish publishing the previously uploaded “${clip.title}” to Instagram account ${record.account_id || "shown in the saved publication"}, using its saved caption and feed choice?`)) return;
+      const restore = startAction(finish, "Finishing…");
+      clearError("#review-error");
+      try { await api(`/api/clips/${encodeURIComponent(clip.id)}/social/instagram/finish`, {confirmed: true}); await refreshLibrary(); updateReviewState(); scheduleFastPoll(); toast("Instagram finish request submitted. Check its saved status for the result."); }
+      catch (error) { showError("#review-error", error); }
+      finally { restore(); }
+    }
+  });
+  const socialForm = $("#social-form");
+  socialForm.elements.caption.addEventListener("input", () => { $("#social-caption-count").textContent = `${socialForm.elements.caption.value.length} / 2200`; });
+  socialForm.elements.brand_content.addEventListener("change", updateSocialDisclosures);
+  socialForm.elements.brand_organic.addEventListener("change", updateSocialDisclosures);
+  socialForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    clearError("#social-error");
+    const clip = currentClip();
+    const creator = state.socialCreator;
+    const platform = state.socialPlatform;
+    const fields = socialForm.elements;
+    if (!clip || !creator || !["instagram", "tiktok"].includes(platform)) return;
+    const caption = fields.caption.value.trim();
+    if (!caption || caption.length > 2200) { showError("#social-error", "Enter a caption between 1 and 2200 characters."); return; }
+    const payload = {confirmed: fields.confirmed.checked, caption};
+    if (platform === "instagram") { payload.account_id = String(creator.account_id || ""); payload.share_to_feed = fields.share_to_feed.checked; }
+    else {
+      if (fields.brand_content.value === "true" && fields.privacy_level.value === "SELF_ONLY") { showError("#social-error", "A paid partnership cannot use Only me visibility. Choose another allowed privacy option, or correct the partnership disclosure if it does not apply."); return; }
+      Object.assign(payload, {creator_username: String(creator.username || ""), privacy_level: fields.privacy_level.value, disable_comment: !fields.allow_comment.checked || fields.allow_comment.disabled, disable_duet: !fields.allow_duet.checked || fields.allow_duet.disabled, disable_stitch: !fields.allow_stitch.checked || fields.allow_stitch.disabled, brand_content_toggle: fields.brand_content.value === "true", brand_organic_toggle: fields.brand_organic.value === "true", is_aigc: fields.is_aigc.value === "true", music_usage_confirmed: fields.music_usage_confirmed.checked});
+    }
+    const restore = startAction($("#social-submit"), "Submitting…");
+    try { await api(`/api/clips/${encodeURIComponent(clip.id)}/social/${platform}/publish`, payload); $("#social-dialog").close(); await refreshLibrary(); updateReviewState(); scheduleFastPoll(); toast(`${platformName(platform)} publishing requested. Follow the saved status before taking any further action.`); }
+    catch (error) { showError("#social-error", error); await refreshLibrary(); updateReviewState(); if (currentClip()?.social_publications?.[platform]) { $("#social-submit").disabled = true; $("#social-fields").disabled = true; } }
+    finally { restore(); if (currentClip()?.social_publications?.[platform]) $("#social-submit").disabled = true; }
+  });
   $("#approve-clip").addEventListener("click", async (event) => {
     const clip = currentClip();
     if (!clip || !$("#review-confirm").checked) return;
@@ -563,7 +778,7 @@ function bindEvents() {
   });
   $("#open-publish").addEventListener("click", () => {
     const clip = currentClip();
-    if (!clip || clip.submitted || clip.is_demo || !isApproved(clip)) return;
+    if (!clip || clip.publication || clip.is_demo || !isApproved(clip)) return;
     $("#publish-form").reset();
     $("#publish-destination").textContent = `Upload “${clip.title}” to channel ${state.settings.upload?.target_channel_id || "(not configured)"}. Saved visibility: ${state.settings.upload?.privacy_status || "private"}.`;
     $("#schedule-timezone").textContent = `Time zone: ${Intl.DateTimeFormat().resolvedOptions().timeZone || "your browser's local time"}. Scheduled uploads start private and become public at the selected time. Leave at least 60 minutes before publishing; your workspace may require more.`;
@@ -598,7 +813,7 @@ function bindEvents() {
   });
   $$("dialog").forEach((dialog) => {
     dialog.addEventListener("click", (event) => { if (event.target !== dialog) return; const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); });
-    dialog.addEventListener("close", () => $$("video", dialog).forEach((video) => video.pause()));
+    dialog.addEventListener("close", () => { $$("video", dialog).forEach((video) => video.pause()); if (dialog.id === "attach-dialog" && !state.attachPendingUpload) state.attachLinkId = null; });
   });
 }
 
@@ -609,6 +824,7 @@ async function init() {
   renderSources();
   renderJobs();
   renderClips();
+  renderLinks();
   try {
     const data = await api("/api/bootstrap");
     state.token = data.token;
@@ -628,6 +844,7 @@ async function init() {
     $("#choose-video").disabled = true;
     $("#try-demo").disabled = true;
     $("#import-path").disabled = true;
+    $("#paste-link").disabled = true;
     toast(error.message, true);
   }
 }

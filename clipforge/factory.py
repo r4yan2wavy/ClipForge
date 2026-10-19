@@ -12,7 +12,7 @@ from .captions import CAPTION_VERSION, write_captions
 from .common import (Candidate, Settings, SourceManifest, Transcript, atomic_json,
                      run_command, sha256_file, stable_id)
 
-RENDER_VERSION = "2"
+RENDER_VERSION = "3"
 
 
 def probe_media(settings: Settings, path: Path) -> dict:
@@ -173,7 +173,7 @@ def render_clip(settings: Settings, media_path: Path, transcript: Transcript,
                               settings.render.fps) + ";" + _audio_graph(settings, duration, bool(music_path)))
         args += ["-filter_complex", graph, "-map", "[v]", "-map", "[a]", "-t", f"{duration:.9f}",
                  "-c:v", "libx264", "-preset", settings.render.preset, "-crf", str(settings.render.crf),
-                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
+                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
                  "-ac", "2", "-movflags", "+faststart", "-map_metadata", "-1", "clip.mp4"]
         run_command(args, cwd=stage)
         rendered = stage / "clip.mp4"

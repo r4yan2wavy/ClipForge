@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clipforge-local"
-version = "0.2.0"
-description = "Local, reviewable video clipping with optional YouTube publishing"
+version = "0.3.0"
+description = "Local browser video studio with authorized link imports and optional social publishing"
 license = {file = "LICENSE"}
 classifiers = ["License :: Other/Proprietary License"]
 requires-python = ">=3.11"
@@ -27,7 +27,7 @@ clipforge = "clipforge.worker:main"
 packages = ["clipforge"]
 
 [tool.setuptools.package-data]
-clipforge = ["prompts/*.txt", "web_static/*.html", "web_static/*.css", "web_static/*.js", "web_static/*.svg", "web_static/*.mp4"]
+clipforge = ["prompts/*.txt", "guides/*.md", "web_static/*.html", "web_static/*.css", "web_static/*.js", "web_static/*.svg", "web_static/*.mp4"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

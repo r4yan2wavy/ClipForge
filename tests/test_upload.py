@@ -108,6 +108,18 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(result["state"], "prepared")
         network.assert_not_called()
 
+    def test_browser_declarations_are_saved_per_publication_without_mutating_shared_artifact(self):
+        before = (self.root / "artifact.json").read_bytes()
+        session = Session([CHANNEL, START, Response(308, headers={"Range": "bytes=0-262143"}), DONE])
+        with patch.object(upload, "_session", return_value=session):
+            result = upload.upload_prepared(self.settings, self.db, self.root, True,
+                publication_options={"made_for_kids": True, "contains_synthetic_media": False, "schedule": None})
+        self.assertEqual(result["state"], "upload_accepted")
+        row = self.db.conn.execute("SELECT * FROM publications").fetchone()
+        self.assertTrue(json.loads(row["metadata_json"])["status"]["selfDeclaredMadeForKids"])
+        self.assertEqual(json.loads(row["artifact_json"]), self.artifact)
+        self.assertEqual((self.root / "artifact.json").read_bytes(), before)
+
     def test_valid_json_with_invalid_artifact_shape_requires_review(self):
         invalid = [[], {}, {**self.artifact, "clip_id": None},
                    {**self.artifact, "video_path": 42},
