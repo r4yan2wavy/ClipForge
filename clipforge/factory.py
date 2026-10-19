@@ -19,7 +19,7 @@ def probe_media(settings: Settings, path: Path) -> dict:
     path = path.resolve()
     if not path.is_file():
         raise FileNotFoundError(f"missing local media: {path.name}")
-    result = run_command([settings.render.ffprobe, "-v", "error", "-show_streams",
+    result = run_command([settings.render.ffprobe, "-v", "error", "-protocol_whitelist", "file,pipe", "-show_streams",
                           "-show_format", "-of", "json", str(path)])
     data = json.loads(result.stdout)
     duration = float(data.get("format", {}).get("duration", 0))
@@ -166,9 +166,9 @@ def render_clip(settings: Settings, media_path: Path, transcript: Transcript,
         stage = Path(temporary)
         written = write_captions(transcript, start, end, stage, settings.render)
         args = [settings.render.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                "-ss", f"{start:.9f}", "-t", f"{duration:.9f}", "-i", str(media_path)]
+                "-ss", f"{start:.9f}", "-t", f"{duration:.9f}", "-protocol_whitelist", "file,pipe", "-i", str(media_path)]
         if music_path:
-            args += ["-stream_loop", "-1", "-i", str(music_path)]
+            args += ["-stream_loop", "-1", "-protocol_whitelist", "file,pipe", "-i", str(music_path)]
         graph = (_video_graph(manifest.framing, settings.render.width, settings.render.height,
                               settings.render.fps) + ";" + _audio_graph(settings, duration, bool(music_path)))
         args += ["-filter_complex", graph, "-map", "[v]", "-map", "[a]", "-t", f"{duration:.9f}",

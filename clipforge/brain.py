@@ -80,7 +80,7 @@ def speech_model_digest(settings: Settings) -> str:
 def extract_audio(settings: Settings, media_path: Path, destination: Path):
     # WAV has no start-time metadata. Fill any initial audio offset with silence
     # so audio-only extraction still uses the video's zero-based presentation time.
-    run_command([settings.render.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", str(media_path),
+    run_command([settings.render.ffmpeg, "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file,pipe", "-i", str(media_path),
                  "-vn", "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", "16000",
                  "-c:a", "pcm_s16le", str(destination)])
 

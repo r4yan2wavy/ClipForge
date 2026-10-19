@@ -23,7 +23,7 @@ log = logging.getLogger("clipforge")
 
 
 def probe_source(settings: Settings, path: Path) -> float:
-    result = json.loads(run_command([settings.render.ffprobe, "-v", "error", "-show_format",
+    result = json.loads(run_command([settings.render.ffprobe, "-v", "error", "-protocol_whitelist", "file,pipe", "-show_format",
                                     "-show_streams", "-of", "json", str(path)]).stdout)
     if not any(s.get("codec_type") == "video" for s in result["streams"]):
         raise ReviewRequired("no video stream")
@@ -333,6 +333,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Local clipping; uploads require config AND explicit flag")
     parser.add_argument("--config", default="config.json")
     sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("serve", help="Open the local browser studio")
+    p.add_argument("--config", dest="serve_config", default=None,
+                   help="Configuration file (created on first launch)")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--no-browser", action="store_true")
     sub.add_parser("init")
     p = sub.add_parser("prepare"); p.add_argument("manifest"); p.add_argument("--retry", action="store_true")
     sub.add_parser("discover")
@@ -354,6 +359,15 @@ def main(argv=None):
         p.add_argument("--enable-upload", action="store_true")
         if cmd == "loop": p.add_argument("--interval", type=int, default=60)
     args = parser.parse_args(argv)
+    if args.command == "serve":
+        if not 1 <= args.port <= 65535:
+            parser.error("port must be between 1 and 65535")
+        path = Path(args.serve_config or args.config).resolve()
+        if not path.exists():
+            atomic_json(path, Settings().model_dump())
+        from .web import run_server
+        run_server(path, port=args.port, open_browser=not args.no_browser)
+        return
     if args.command == "init":
         path = Path(args.config).resolve()
         if path.exists(): parser.error("configuration already exists")

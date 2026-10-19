@@ -1,6 +1,19 @@
 # ClipForge Local
 
-A Python 3.11+ starter that discovers YouTube metadata, accepts authorized original media, transcribes and selects clips locally, renders captioned vertical video, and optionally publishes through owner-authorized YouTube uploads. **The default stops at local preparation.** This is working source code, with synthetic media and mocked network tests; it is not a hosted service.
+Turn your recordings into vertical clips in a browser studio running on your own computer. Import a video, choose a cut and framing, render it, then preview and download the result. Optional local AI can transcribe and find clips; optional YouTube publishing uses your channel's authorization. **The default saves clips locally.**
+
+## Open the browser app
+
+1. Download this repository's ZIP and extract it into a writable folder, or clone the repository.
+2. Install **Python 3.11 or newer** and **[FFmpeg with ffprobe](https://ffmpeg.org/download.html)**. Your FFmpeg build needs libx264, AAC and libass. On Windows, enable Python's **Add Python to PATH** option during installation.
+3. On **Windows**, double-click **`Start-ClipForge.bat`**. On **macOS/Linux**, open a terminal in the extracted folder and run `bash ./start-clipforge.sh`.
+4. ClipForge opens your browser at **http://127.0.0.1:8000/**. Keep its terminal window open while working; press **Ctrl+C** there to stop it.
+
+The launcher creates a private `.venv` and installs the basic Python requirements on first use, which needs an internet connection. It does not install FFmpeg, Ollama or models. The app creates `config.json` if missing. In **Settings**, check FFmpeg and ffprobe; you can enter their full executable paths if they are not on PATH.
+
+Start in **Studio** with **Try a sample**, or add a recording you own or have permission to edit. Choose **Pick a moment** for a manual clip, set its start/end, select crop/fit/blur framing, and render. An optional text overlay shows the words you type for the whole cut; automatic speech captions require the separate AI setup. In **Clips**, preview the actual render, edit its title/description, review it, and download the MP4. The sample is a synthetic test pattern with tones, not speech, and cannot be published through the app.
+
+Manual clips need only Python and FFmpeg. For AI, optional YouTube setup, saved files, and troubleshooting, see the **[browser app guide](docs/local-app.md)**. The command-line pipeline and detailed architecture remain documented below.
 
 ## License
 
@@ -29,7 +42,9 @@ The CPU baseline is faster-whisper `small` with `int8`, followed sequentially by
 | Optional upload | google-auth, google-auth-oauthlib, Requests | Channel-owner consent, Desktop OAuth client |
 | Scheduling | cron, Windows Task Scheduler or CLI loop | Computer awake, correct account/environment/absolute paths |
 
-## Install
+## Advanced CLI and AI setup
+
+These steps prepare the full command-line, local AI and optional YouTube workflow. For manual cuts in the browser app, use the simpler launch instructions above; Ollama and speech models are optional.
 
 Install Python 3.11 or newer, [FFmpeg](https://ffmpeg.org/download.html) including **ffprobe** and libass, and [Ollama](https://ollama.com/download). Test both executables, and check `ffmpeg -filters` contains `ass`, `sidechaincompress` and `loudnorm`. FFmpeg's licensing depends on the selected build; follow its notices when redistributing binaries. This project does not bundle FFmpeg or model weights.
 

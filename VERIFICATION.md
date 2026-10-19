@@ -1,5 +1,50 @@
 # Validation record
 
+## Local browser studio, version 0.2.0
+
+The combined suite passed **97 tests and 51 subtests** in 17.41 seconds on
+Windows AMD64 / Python 3.12.14 with real FFmpeg/ffprobe 9.0.2. No media tests
+were skipped. The local app environment used Pydantic 2.14.1, Requests 2.34.2,
+FileLock 3.32.7 and tzdata 2026.5; pytest 9.1.1 was supplied from the separate
+test dependency directory. The earlier engine validation below used Pydantic
+2.14.0.
+
+- An actual localhost HTTP flow streamed a generated video into the app,
+  queued and completed a real 1080×1920 manual render, edited metadata,
+  approved the clip, downloaded the MP4 and captions, verified byte-range
+  preview responses, and restarted the service with the library intact.
+- Real manual render tests cover video without audio, short audio tracks,
+  crop/fit/blur framing, escaped static text, removal of an overlay, intact
+  cache reuse, finite interval validation and full output decoding. Manual
+  overlays do not claim to transcribe speech.
+- HTTP/service checks cover Host/Origin/app-token protections, JSON/upload
+  limits, malformed/unsatisfiable byte ranges, unknown media IDs, traversal
+  refusal, failed-upload cleanup, settings validation, workspace exclusion,
+  restart interruption recovery and explicit AI retry forwarding.
+- Publication tests use mocks. They check review reset after editing,
+  immutable submitted artifacts, queued-publication snapshot checks,
+  synthetic-sample refusal, and resumption of an existing immutable intent
+  without replacing its channel, metadata, declarations or schedule.
+- Windows and Bash launchers were smoke-tested offline with spaces and an
+  ampersand in the project/config paths; flags were forwarded correctly.
+  The Windows project's actual private Python environment was also created
+  and its base dependencies installed successfully from the package index.
+- JavaScript syntax, HTML structure, duplicate IDs and static selector
+  targets were checked. The running app returned successful HTML, CSS,
+  JavaScript and bootstrap responses with the rendering tools ready.
+
+Browser automation refused inspection of the localhost tab under its URL
+security policy. No alternate browser surface was used. Consequently,
+visual layout and interactive browser behavior have **not** been verified
+in a browser here; the real HTTP/render checks above do not establish that.
+Real speech/LLM inference, OAuth consent and YouTube uploads remain untested.
+
+The 0.2.0 wheel builds successfully with the static HTML/CSS/JavaScript and
+packaged sample video. Runtime settings, media, credentials, environments,
+model weights and executable binaries are excluded from the source archive.
+
+## Earlier engine validation (0.1.0)
+
 Validated October 18, 2026, on Windows AMD64 with Python 3.12.14 and FFmpeg/ffprobe
 9.0.2 (libx264, AAC and libass enabled). The main source uses Python 3.11+ syntax.
 Python 3.11 itself and other operating systems were not executed here.
