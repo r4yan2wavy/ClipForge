@@ -1,0 +1,7 @@
+# Versions used for offline validation, not a promise of model/GPU compatibility.
+# Python 3.12.14, Windows AMD64; FFmpeg/ffprobe 9.0.2 portable build (not bundled).
+pydantic==2.14.0
+requests==2.34.2
+filelock==3.32.7
+tzdata==2026.5
+pytest==9.1.1

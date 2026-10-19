@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipforge-local"
+version = "0.1.0"
+description = "Local, reviewable video clipping with optional YouTube publishing"
+license = {file = "LICENSE"}
+classifiers = ["License :: Other/Proprietary License"]
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.10,<3", "requests>=2.32,<3", "filelock>=3.16,<4", "tzdata>=2025.1"]
+
+[project.optional-dependencies]
+ai = ["faster-whisper>=1.1,<2"]
+youtube = ["google-auth>=2.36,<3", "google-auth-oauthlib>=1.2,<2"]
+dev = ["pytest>=8,<10"]
+
+[project.urls]
+Repository = "https://github.com/r4yan2wavy/ClipForge"
+Issues = "https://github.com/r4yan2wavy/ClipForge/issues"
+
+[project.scripts]
+clipforge = "clipforge.worker:main"
+
+[tool.setuptools]
+packages = ["clipforge"]
+
+[tool.setuptools.package-data]
+clipforge = ["prompts/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

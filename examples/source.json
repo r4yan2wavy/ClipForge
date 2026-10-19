@@ -1,0 +1,23 @@
+{
+  "media_path": "inbox/my-original.mp4",
+  "source_video_id": null,
+  "source_url": null,
+  "rights_category": "original",
+  "permission_reference": "Replace with your original-recording or written-license record",
+  "creator_credit": "Replace with verified creator credit, exactly as required",
+  "contribution": "Replace with the actual original demonstration, analysis or storytelling in this source",
+  "editorial_approved": false,
+  "visual_approved": false,
+  "metadata_approved": false,
+  "framing": "center_crop",
+  "transcript_path": null,
+  "candidates_path": null,
+  "metadata_path": null,
+  "music_path": null,
+  "music_license_reference": null,
+  "music_attribution": null,
+  "music_catalog": null,
+  "schedule": null,
+  "made_for_kids": null,
+  "contains_synthetic_media": null
+}

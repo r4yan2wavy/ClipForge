@@ -1,0 +1,33 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,64,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,70,70,230,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:00.50,Default,,0,0,0,,Fixture 0.
+Dialogue: 0,0:00:01.00,0:00:01.50,Default,,0,0,0,,Fixture 1.
+Dialogue: 0,0:00:02.00,0:00:02.50,Default,,0,0,0,,Fixture 2.
+Dialogue: 0,0:00:03.00,0:00:03.50,Default,,0,0,0,,Fixture 3.
+Dialogue: 0,0:00:04.00,0:00:04.50,Default,,0,0,0,,Fixture 4.
+Dialogue: 0,0:00:05.00,0:00:05.50,Default,,0,0,0,,Fixture 5.
+Dialogue: 0,0:00:06.00,0:00:06.50,Default,,0,0,0,,Fixture 6.
+Dialogue: 0,0:00:07.00,0:00:07.50,Default,,0,0,0,,Fixture 7.
+Dialogue: 0,0:00:08.00,0:00:08.50,Default,,0,0,0,,Fixture 8.
+Dialogue: 0,0:00:09.00,0:00:09.50,Default,,0,0,0,,Fixture 9.
+Dialogue: 0,0:00:10.00,0:00:10.50,Default,,0,0,0,,Fixture 10.
+Dialogue: 0,0:00:11.00,0:00:11.50,Default,,0,0,0,,Fixture 11.
+Dialogue: 0,0:00:12.00,0:00:12.50,Default,,0,0,0,,Fixture 12.
+Dialogue: 0,0:00:13.00,0:00:13.50,Default,,0,0,0,,Fixture 13.
+Dialogue: 0,0:00:14.00,0:00:14.50,Default,,0,0,0,,Fixture 14.
+Dialogue: 0,0:00:15.00,0:00:15.50,Default,,0,0,0,,Fixture 15.
+Dialogue: 0,0:00:16.00,0:00:16.50,Default,,0,0,0,,Fixture 16.
+Dialogue: 0,0:00:17.00,0:00:17.50,Default,,0,0,0,,Fixture 17.
+Dialogue: 0,0:00:18.00,0:00:18.50,Default,,0,0,0,,Fixture 18.
+Dialogue: 0,0:00:19.00,0:00:19.50,Default,,0,0,0,,Fixture 19.

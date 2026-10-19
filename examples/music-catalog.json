@@ -1,0 +1,10 @@
+{
+  "tracks": [
+    {
+      "path": "music/replace-with-licensed-track.wav",
+      "approved": false,
+      "license_reference": "Replace with verified license and scope, including commercial use if applicable",
+      "attribution": "Replace with EXACT required attribution or an empty string if none is required"
+    }
+  ]
+}

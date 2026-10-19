@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+secrets/
+data/
+inbox/
+prepared/
+*.db*
+*.log*
+/config.json
+/models/
+/build/
+/dist/
+.env
+.env.*
+!.env.example
