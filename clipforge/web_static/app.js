@@ -130,6 +130,7 @@ function isApproved(clip) { return ["PREPARED", "UPLOADED", "PROCESSING", "READY
 function currentClip() { return state.clips.find((clip) => clip.id === state.clipId); }
 function currentSource() { return state.sources.find((source) => source.id === state.sourceId); }
 function sampleSource(source) { return Boolean(source?.is_demo || /synthetic.*sample|sample.*synthetic|clipforge.*sample/i.test(source?.name || "")); }
+function availableSource(source) { return Boolean(source && source.available !== false && !source.source_deleted); }
 
 function navigate() {
   const page = ["studio", "clips", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "studio";
@@ -151,20 +152,32 @@ function renderSources() {
     return;
   }
   $("#source-list").innerHTML = state.sources.map((source) => {
-    const url = mediaUrl(source.url, "source");
-    return `<article class="source-row"><div class="source-thumb">${url ? `<video src="${esc(url)}#t=0.1" muted preload="metadata" aria-hidden="true" tabindex="-1"></video>` : icon("film")}</div><div class="source-info"><h3 title="${esc(source.name)}">${esc(source.name)}${sampleSource(source) ? '<span class="sample-badge">SAMPLE</span>' : ""}</h3><p>${esc(duration(source.duration_s))} <span aria-hidden="true">·</span> ${esc(source.width)} × ${esc(source.height)} <span aria-hidden="true">·</span> ${esc(bytes(source.bytes))}${source.has_audio === false ? " · No audio" : ""}</p></div><button class="button subtle small" type="button" data-create="${esc(source.id)}">${icon("scissors")} Create clip <span aria-hidden="true">↗</span></button></article>`;
+    const available = availableSource(source);
+    const url = available ? mediaUrl(source.url, "source") : "";
+    return `<article class="source-row${available ? "" : " source-unavailable"}"><div class="source-thumb">${url ? `<video src="${esc(url)}#t=0.1" muted preload="metadata" aria-hidden="true" tabindex="-1"></video>` : icon("film")}</div><div class="source-info"><h3 title="${esc(source.name)}">${esc(source.name)}${sampleSource(source) ? '<span class="sample-badge">SAMPLE</span>' : ""}${available ? "" : `<span class="badge">${source.source_deleted ? "Source deleted" : "Source unavailable"}</span>`}</h3><p>${available ? `${esc(duration(source.duration_s))} <span aria-hidden="true">·</span> ${esc(source.width)} × ${esc(source.height)} <span aria-hidden="true">·</span> ${esc(bytes(source.bytes))}${source.has_audio === false ? " · No audio" : ""}` : "Finished clips are kept. Import the video again to create more clips."}</p></div><div class="source-actions">${available ? `<button class="button subtle small" type="button" data-create="${esc(source.id)}">${icon("scissors")} Create clip <span aria-hidden="true">↗</span></button>` : ""}${source.managed_file && available ? `<button class="text-button danger-text" type="button" data-source-delete="${esc(source.id)}" aria-label="Delete source video: ${esc(source.name)}" title="${source.can_delete_file ? "Delete the source file and keep finished clips" : "Wait for this source's jobs to finish before deleting it"}"${source.can_delete_file ? "" : " disabled"}>${icon("trash")} Delete source</button>` : ""}</div></article>`;
   }).join("");
 }
 
 function renderLinks() {
   $("#link-count").textContent = state.links.length;
-  if (!state.links.length) { $("#link-list").innerHTML = emptyState("link", "Bring a link along.", "Paste a direct video or save a source page and attach your authorized file."); return; }
+  if (!state.links.length) { $("#link-list").innerHTML = emptyState("link", "Bring a link along.", "Paste a supported public video link to download it to this computer."); return; }
   $("#link-list").innerHTML = state.links.map((link) => {
     const url = externalUrl(link.url);
-    const ready = link.state === "ready" && state.sources.some((source) => source.id === link.source_id);
+    const ready = link.state === "ready" && state.sources.some((source) => source.id === link.source_id && availableSource(source));
     const importing = link.state === "importing";
-    return `<article class="link-card"><span class="link-platform-icon">${icon(icons[link.platform] ? link.platform : "link")}</span><div class="link-card-main"><div class="link-card-title"><strong>${esc(platformName(link.platform))}</strong><span class="badge${ready ? " green" : importing ? " blue" : ""}">${ready ? "Video attached" : importing ? "Importing" : link.state === "failed" ? "Import needs attention" : "Video file needed"}</span></div><p class="link-url">${esc(link.url)}</p><p class="link-message">${esc(link.message || (ready ? "Your video is ready to clip." : "Attach an authorized local video file to use this source."))}</p><div class="link-card-actions">${url ? `<a class="text-button" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open original ↗</a>` : ""}${ready ? `<button class="text-button" type="button" data-create="${esc(link.source_id)}">Create clip ↗</button>` : !importing ? `<button class="button subtle small" type="button" data-attach="${esc(link.id)}">${icon("folder")} Attach a video</button>` : ""}${link.state === "failed" && link.can_download ? `<button class="text-button" type="button" data-link-retry="${esc(link.id)}">Retry import</button>` : ""}<button class="text-button danger-text link-delete" type="button" data-link-delete="${esc(link.id)}" aria-label="Delete saved link: ${esc(link.url)}" title="${importing ? "Wait for the import to finish" : "Delete this saved link"}"${importing ? " disabled" : ""}>${icon("trash")} Delete</button></div></div></article>`;
+    const canImport = !ready && !importing && link.can_download;
+    return `<article class="link-card"><span class="link-platform-icon">${icon(icons[link.platform] ? link.platform : "link")}</span><div class="link-card-main"><div class="link-card-title"><strong>${esc(platformName(link.platform))}</strong><span class="badge${ready ? " green" : importing ? " blue" : ""}">${ready ? "Ready to clip" : importing ? "Importing" : link.state === "failed" ? "Import needs attention" : canImport ? "Ready to import" : "Video file needed"}</span></div><p class="link-url">${esc(link.url)}</p><p class="link-message">${esc(link.message || (ready ? "Your video is ready to clip." : canImport ? "Import the source video onto this computer, then create your clips." : "Attach an authorized local video file to use this source."))}</p><div class="link-card-actions">${url ? `<a class="text-button" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open original ↗</a>` : ""}${ready ? `<button class="text-button" type="button" data-create="${esc(link.source_id)}">Create clip ↗</button>` : ""}${canImport ? `<button class="button subtle small" type="button" data-link-retry="${esc(link.id)}">${icon(link.state === "failed" ? "refresh" : "download")} ${link.state === "failed" ? "Retry import" : "Import video"}</button>` : ""}${!ready && !importing ? `<button class="text-button" type="button" data-attach="${esc(link.id)}">${icon("folder")} Attach a video</button>` : ""}<button class="text-button danger-text link-delete" type="button" data-link-delete="${esc(link.id)}" aria-label="Delete saved link: ${esc(link.url)}" title="${importing ? "Wait for the import to finish" : "Delete this saved link"}"${importing ? " disabled" : ""}>${icon("trash")} Delete</button></div></div></article>`;
   }).join("");
+}
+
+function updateAttachSources() {
+  const select = $("#attach-source-select");
+  const selected = select.value;
+  const sources = state.sources.filter((source) => availableSource(source) && !sampleSource(source));
+  select.innerHTML = '<option value="">Choose a source…</option>' + sources.map((source) => `<option value="${esc(source.id)}">${esc(source.name)} · ${esc(duration(source.duration_s))}</option>`).join("");
+  if (sources.some((source) => source.id === selected)) select.value = selected;
+  select.disabled = !sources.length;
+  $("#attach-submit").disabled = select.disabled;
 }
 
 function openAttach(linkId) {
@@ -172,15 +185,15 @@ function openAttach(linkId) {
   if (!link) return;
   state.attachLinkId = linkId;
   $("#attach-link-name").textContent = `Attach the matching video file for ${link.url}`;
-  $("#attach-source-select").innerHTML = '<option value="">Choose a source…</option>' + state.sources.filter((source) => !sampleSource(source)).map((source) => `<option value="${esc(source.id)}">${esc(source.name)} · ${esc(duration(source.duration_s))}</option>`).join("");
-  $("#attach-source-select").disabled = !state.sources.some((source) => !sampleSource(source));
-  $("#attach-submit").disabled = $("#attach-source-select").disabled;
+  updateAttachSources();
   clearError("#attach-error");
   $("#attach-dialog").showModal();
 }
 
 async function attachSource(sourceId) {
   if (!state.attachLinkId) return;
+  const source = state.sources.find((item) => item.id === sourceId);
+  if (source && !availableSource(source)) throw new Error("This source video is unavailable. Import its file again before attaching it.");
   await api(`/api/links/${encodeURIComponent(state.attachLinkId)}/attach`, {source_id: sourceId});
   state.attachLinkId = null;
 }
@@ -192,6 +205,8 @@ function jobLabel(job) {
   if (status === "interrupted") return "Interrupted";
   if (status === "queued") return "In the queue";
   const stage = String(job.stage || "Working");
+  const labels = {resolving: "Finding video", downloading: "Downloading video", merging: "Combining audio & video", verifying: "Checking video"};
+  if (job.mode === "link_import" && labels[stage]) return labels[stage];
   return stage.charAt(0).toUpperCase() + stage.slice(1).replace(/_/g, " ");
 }
 
@@ -214,9 +229,14 @@ function renderJobs() {
     const canRetry = failed && ["manual", "ai"].includes(job.mode);
     let progress = Number(job.progress) || 0;
     if (progress > 0 && progress <= 1) progress *= 100;
+    const downloadTotal = Number(job.download_total_bytes) || 0;
+    const downloadBytes = Number(job.download_bytes) || 0;
+    const downloadProgress = job.mode === "link_import" && job.stage === "downloading" && downloadTotal > 0;
+    if (downloadProgress) progress = downloadBytes / downloadTotal * 100;
     progress = Math.min(100, Math.max(2, progress));
+    const progressLabel = job.mode === "link_import" ? `${jobLabel(job)}${downloadProgress ? ` · ${bytes(downloadBytes)} / ${bytes(downloadTotal)}` : ""}` : `${jobLabel(job)} · stage estimate`;
     const clipId = Array.isArray(job.clip_ids) ? job.clip_ids[0] : null;
-    return `<article class="job-row"><span class="job-icon${running ? " active" : failed ? " failed" : ""}">${icon(running ? "spinner" : failed ? "alert" : "check", running ? "loading-spinner" : "")}</span><div class="job-main"><h3>${esc(job.title || job.source_name || "Studio job")}</h3><p>${esc(job.message || job.source_name || jobLabel(job))}</p></div>${running ? `<div class="job-progress"><span>${esc(jobLabel(job))} · stage estimate</span><div class="progress-track"><span style="width:${progress}%"></span></div></div>` : canRetry ? `<button class="button subtle small" type="button" data-retry="${esc(job.id)}">${icon("refresh")} Retry</button>` : clipId ? `<button class="text-button" type="button" data-review="${esc(clipId)}">Review clip ↗</button>` : failed ? '<a class="text-button" href="#settings">Check settings ↗</a>' : `<span class="job-state">${esc(jobLabel(job))}</span>`}</article>`;
+    return `<article class="job-row"><span class="job-icon${running ? " active" : failed ? " failed" : ""}">${icon(running ? "spinner" : failed ? "alert" : "check", running ? "loading-spinner" : "")}</span><div class="job-main"><h3>${esc(job.title || job.source_name || "Studio job")}</h3><p>${esc(job.message || job.source_name || jobLabel(job))}</p></div>${running ? `<div class="job-progress"><span>${esc(progressLabel)}</span><div class="progress-track"><span style="width:${progress}%"></span></div></div>` : canRetry ? `<button class="button subtle small" type="button" data-retry="${esc(job.id)}">${icon("refresh")} Retry</button>` : clipId ? `<button class="text-button" type="button" data-review="${esc(clipId)}">Review clip ↗</button>` : failed ? '<a class="text-button" href="#settings">Check settings ↗</a>' : `<span class="job-state">${esc(jobLabel(job))}</span>`}</article>`;
   }).join("");
 }
 
@@ -243,7 +263,7 @@ function renderClips() {
 
 function renderHealth() {
   const capabilities = state.capabilities;
-  const tools = [{key: "ffmpeg", name: "FFmpeg", purpose: "Video rendering"}, {key: "ffprobe", name: "FFprobe", purpose: "Video inspection"}, {key: "speech", name: "Whisper", purpose: "AI speech captions"}, {key: "ollama", name: "Ollama", purpose: "AI clip selection"}];
+  const tools = [{key: "ffmpeg", name: "FFmpeg", purpose: "Video rendering"}, {key: "ffprobe", name: "FFprobe", purpose: "Video inspection"}, {key: "link_import", name: "Link importer · yt-dlp", purpose: "Local YouTube, Twitch and Kick imports"}, {key: "speech", name: "Whisper", purpose: "AI speech captions"}, {key: "ollama", name: "Ollama", purpose: "AI clip selection"}];
   $("#health-list").innerHTML = tools.map((tool) => {
     const info = capabilities[tool.key] || {};
     return `<article class="health-card${info.ok ? " ok" : ""}"><div class="health-card-top"><h3>${esc(tool.name)}</h3>${icon(info.ok ? "check" : "alert")}</div><p>${esc(info.message || tool.purpose)}</p><span class="health-state">${info.ok ? "Ready to use" : "Setup needed"}${["speech", "ollama"].includes(tool.key) ? " · optional" : ""}</span></article>`;
@@ -253,6 +273,7 @@ function renderHealth() {
   $("#setup-summary").textContent = renderReady ? (aiReady ? "Your studio is ready" : "Ready to create manual clips") : "Let's get your studio ready";
   $("#setup-detail").textContent = renderReady ? (aiReady ? "Video tools and local AI are connected." : "Add local AI in Settings whenever you're ready.") : "Set up FFmpeg and FFprobe in Settings.";
   $("#ai-readiness").textContent = aiReady ? "Your local AI tools are ready." : "Local AI setup is incomplete. Check Whisper and Ollama in Settings before starting.";
+  $("#link-import-status").textContent = capabilities.link_import?.message || "Link imports download the source video to this computer. Check setup for importer readiness.";
   ["instagram", "tiktok", "twitch"].forEach((platform) => { const info = capabilities[platform]; $("#" + platform + "-setup-status").textContent = info?.message || "Save your settings, then check setup to inspect the credential file."; });
 }
 
@@ -291,10 +312,22 @@ function applyLibrary(data) {
   const jobSignature = JSON.stringify(state.jobs);
   const clipSignature = JSON.stringify(state.clips);
   const linkSignature = JSON.stringify(state.links);
-  if (sourceSignature !== state.sourceSignature) { state.sourceSignature = sourceSignature; renderSources(); }
+  const sourcesChanged = sourceSignature !== state.sourceSignature;
+  if (sourcesChanged) {
+    state.sourceSignature = sourceSignature;
+    renderSources();
+    if ($("#attach-dialog").open) updateAttachSources();
+    if ($("#create-dialog").open && !availableSource(currentSource())) {
+      $("#source-video").pause();
+      $("#source-video").removeAttribute("src");
+      $("#source-video").load();
+      $("#create-submit").disabled = true;
+      showError("#create-error", "This source video is unavailable. Import it again to create more clips. Your finished clips are kept.");
+    }
+  }
   if (jobSignature !== state.jobSignature) { state.jobSignature = jobSignature; renderJobs(); if ($("#review-dialog").open && currentClip()) updateReviewState(); }
   if (clipSignature !== state.clipSignature) { state.clipSignature = clipSignature; renderClips(); if ($("#review-dialog").open && currentClip()) updateReviewState(); }
-  if (linkSignature !== state.linkSignature) { state.linkSignature = linkSignature; renderLinks(); }
+  if (sourcesChanged || linkSignature !== state.linkSignature) { state.linkSignature = linkSignature; renderLinks(); }
 }
 
 async function refreshLibrary() {
@@ -394,10 +427,11 @@ function updateFraming() {
 
 function openCreate(sourceId) {
   const source = state.sources.find((item) => item.id === sourceId);
-  if (!source) { toast("This source is no longer available. Import it again.", true); return; }
+  if (!availableSource(source)) { toast("This source is no longer available. Import it again.", true); return; }
   state.sourceId = sourceId;
   const form = $("#create-form");
   form.reset();
+  $("#create-submit").disabled = false;
   form.elements.title.value = sampleSource(source) ? "My first ClipForge clip" : String(source.name || "New clip").replace(/\.[^.]+$/, "").slice(0, 85);
   form.elements.end_s.value = duration(Math.min(Number(source.duration_s) || 15, 30), true);
   form.elements.start_s.value = "0:00";
@@ -609,7 +643,33 @@ function bindEvents() {
     catch (error) { toast(error.message, true); }
     finally { restore(); }
   });
-  $("#source-list").addEventListener("click", (event) => { const button = event.target.closest("[data-create]"); if (button) openCreate(button.dataset.create); });
+  $("#source-list").addEventListener("click", (event) => {
+    const create = event.target.closest("[data-create]");
+    const remove = event.target.closest("[data-source-delete]");
+    if (create) openCreate(create.dataset.create);
+    if (remove) {
+      const source = state.sources.find((item) => item.id === remove.dataset.sourceDelete);
+      if (!source?.managed_file || !availableSource(source) || !source.can_delete_file) return;
+      $("#delete-source-form").elements.source_id.value = source.id;
+      $("#delete-source-name").textContent = `${source.name} · ${bytes(source.bytes)}`;
+      clearError("#delete-source-error");
+      $("#delete-source-dialog").showModal();
+    }
+  });
+  $("#delete-source-cancel").addEventListener("click", () => $("#delete-source-dialog").close());
+  $("#delete-source-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const sourceId = event.currentTarget.elements.source_id.value;
+    clearError("#delete-source-error");
+    const restore = startAction($("#delete-source-submit"), "Deleting source…");
+    try {
+      await api(`/api/sources/${encodeURIComponent(sourceId)}/delete`, {confirmed: true});
+      $("#delete-source-dialog").close();
+      await refreshLibrary();
+      toast("Source video deleted. Your finished clips are kept.");
+    } catch (error) { showError("#delete-source-error", error); }
+    finally { restore(); }
+  });
   $("#paste-link").addEventListener("click", () => { $("#link-form").reset(); clearError("#link-error"); $("#link-dialog").showModal(); });
   $("#link-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -640,7 +700,7 @@ function bindEvents() {
     if (attach) openAttach(attach.dataset.attach);
     if (retry) {
       const restore = startAction(retry, "Queuing…");
-      try { await api(`/api/links/${encodeURIComponent(retry.dataset.linkRetry)}/retry`, {}); await refreshLibrary(); scheduleFastPoll(); toast("Link import queued again."); }
+      try { await api(`/api/links/${encodeURIComponent(retry.dataset.linkRetry)}/retry`, {}); await refreshLibrary(); scheduleFastPoll(); toast("Video import queued. Follow its progress in the workshop."); }
       catch (error) { toast(error.message, true); }
       finally { restore(); }
     }
@@ -698,7 +758,7 @@ function bindEvents() {
     const source = currentSource();
     const start = parseTime(fields.start_s.value);
     const end = parseTime(fields.end_s.value);
-    if (!source) { showError("#create-error", "Choose an available source video first."); return; }
+    if (!availableSource(source)) { showError("#create-error", "Choose an available source video first. Import a deleted source again to make more clips."); return; }
     if (fields.mode.value === "manual" && (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end - start < 1 || end - start > 180 || end > Number(source.duration_s) + .05)) { showError("#create-error", "Choose a valid range within your video, between 1 second and 3 minutes long. Use mm:ss or seconds."); return; }
     const restore = startAction($("#create-submit"), "Starting…");
     const payload = {source_id: source.id, mode: fields.mode.value, title: fields.title.value.trim(), framing: fields.framing.value, start_s: fields.mode.value === "manual" ? start : 0, end_s: fields.mode.value === "manual" ? end : 0, caption_text: fields.mode.value === "manual" ? fields.caption_text.value.trim() : "", rights_category: fields.rights_category.value, permission_reference: fields.rights_category.value === "original" ? "Original recording owned by me" : fields.permission_reference.value.trim(), creator_credit: fields.creator_credit.value.trim(), contribution: fields.contribution.value.trim()};

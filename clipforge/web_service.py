@@ -10,6 +10,7 @@ import importlib.util
 import json
 import math
 import queue
+import re
 import secrets
 import shutil
 import subprocess
@@ -117,6 +118,17 @@ class WebService:
                     self._save_job(db, job)
             for row in db.conn.execute("SELECT * FROM web_links").fetchall():
                 link = json.loads(row["data"])
+                # Upgrade saved references without initiating network requests.
+                if link["platform"] in {"youtube", "twitch", "kick"}:
+                    from .link_import import describe, LinkError
+                    try:
+                        descriptor = describe(link["url"])
+                        link.update(can_download=descriptor["can_download"], page_import=descriptor["page_import"])
+                        if link["state"] == "needs_file" and descriptor["can_download"]:
+                            link["message"] = "Choose Import video to download this recording onto your computer, or attach a video file."
+                    except LinkError:
+                        pass
+                    self._save_link(db, link)
                 if link["state"] == "importing":
                     link.update(state="failed", message="The download was interrupted. Retry it explicitly, or attach your authorized file.")
                     self._save_link(db, link)
@@ -184,6 +196,10 @@ class WebService:
         result["twitch"] = twitch_status(self.settings)
         for platform in ("instagram", "tiktok"):
             result[platform] = provider_status(self.settings, platform)
+        from .page_import import importer_status
+        result["link_import"] = importer_status(self.settings.render.ffmpeg)
+        if not result["ffmpeg"]["ok"] or not result["ffprobe"]["ok"]:
+            result["link_import"] = {"ok": False, "message": "Set up FFmpeg and FFprobe in Settings before importing links."}
         self.capabilities = result
         return result
 
@@ -200,9 +216,24 @@ class WebService:
             raise WebError("This video is no longer in the library.", 404)
         return json.loads(row["data"])
 
-    @staticmethod
-    def source_record(source):
-        return {k: v for k, v in source.items() if k not in {"path", "sha256"}}
+    def _managed_source_path(self, source):
+        path = Path(source["path"])
+        folder = self.data_dir / "sources"
+        root = folder.resolve()
+        if (not folder.is_symlink() and not path.is_symlink() and path.resolve().parent == root
+                and re.fullmatch(r"[0-9a-f]{32}\.[a-z0-9]{1,8}", path.name)):
+            return path
+        return None
+
+    def source_record(self, source, busy=False):
+        record = {k: v for k, v in source.items() if k not in {"path", "sha256"}}
+        available = not source.get("source_deleted") and Path(source["path"]).is_file()
+        managed = self._managed_source_path(source) is not None
+        record.update(available=bool(available), managed_file=managed,
+                      can_delete_file=bool(available and managed and not busy))
+        if not available:
+            record["url"] = None
+        return record
 
     def _save_job(self, db, job):
         db.conn.execute("INSERT OR REPLACE INTO web_jobs VALUES(?,?)", (job["id"], json.dumps(job, allow_nan=False)))
@@ -290,7 +321,8 @@ class WebService:
 
     def library(self):
         with self.db() as db:
-            sources = [self.source_record(s) for s in self._sources(db)]
+            busy = self._active(db)
+            sources = [self.source_record(s, busy) for s in self._sources(db)]
             jobs = [self.job_record(json.loads(r["data"]), db) for r in db.conn.execute("SELECT data FROM web_jobs ORDER BY rowid DESC")]
             clips = []
             for row in db.conn.execute("SELECT clip_id FROM artifacts WHERE active=1 ORDER BY created_at DESC"):
@@ -304,7 +336,7 @@ class WebService:
 
     @staticmethod
     def link_record(link):
-        return {key: value for key, value in link.items() if key not in {"private_url", "clip_id"}}
+        return {key: value for key, value in link.items() if key not in {"private_url", "clip_id", "page_import"}}
 
     def _save_link(self, db, link):
         db.conn.execute("INSERT OR REPLACE INTO web_links VALUES(?,?)", (link["id"], json.dumps(link)))
@@ -329,9 +361,15 @@ class WebService:
             if descriptor["platform"] == "direct":
                 # Signed query strings stay in local private records, never the browser library.
                 link["private_url"] = payload["url"]
-            ready = descriptor["platform"] == "direct" or (descriptor["clip_id"] and twitch_status(self.settings)["ok"])
+            importer = self.capabilities.get("link_import", {})
+            page_ready = importer.get("ok") and (descriptor["platform"] != "youtube" or importer.get("youtube_ready", importer.get("ok")))
+            ready = (descriptor["platform"] == "direct"
+                     or (descriptor.get("page_import") and page_ready)
+                     or (descriptor["clip_id"] and twitch_status(self.settings)["ok"]))
             if ready:
                 link.update(state="importing", message="Downloading the authorized video into your local library…")
+            elif descriptor.get("page_import"):
+                link["message"] = "Check Link importer in Settings, then choose Import video. You can also attach a local video file."
             self._save_link(db, link)
             result = {"link": self.link_record(link)}
             if ready:
@@ -350,7 +388,7 @@ class WebService:
             if link["state"] == "importing":
                 raise WebError("Wait for this link download to finish before attaching a different file.", 409)
             source = self._source(db, _text(payload.get("source_id"), "video source", 128))
-            if not Path(source["path"]).is_file():
+            if source.get("source_deleted") or not Path(source["path"]).is_file():
                 raise WebError("The attached video was moved or deleted. Add it again.", 409)
             source["source_url"] = link["url"]
             db.conn.execute("UPDATE web_sources SET data=? WHERE id=?", (json.dumps(source), source["id"]))
@@ -359,14 +397,26 @@ class WebService:
             return {"link": self.link_record(link), "source": self.source_record(source)}
 
     def retry_link(self, link_id, payload):
-        from .link_import import twitch_status
+        from .link_import import twitch_status, describe
         _strict_keys(payload, set())
         with self.guard, self.db() as db:
             link = self._link(db, link_id)
+            try:
+                descriptor = describe(link["url"])
+            except ValueError:
+                raise WebError("This saved link is no longer supported. Attach a local video instead.", 409) from None
+            link.update(can_download=descriptor["can_download"], page_import=descriptor["page_import"], clip_id=descriptor["clip_id"])
+            if link["state"] == "ready" and link.get("source_id"):
+                source = self._source(db, link["source_id"])
+                if not self.source_record(source)["available"]:
+                    link.update(state="needs_file", source_id=None)
             if link["state"] not in {"failed", "needs_file"} or not link["can_download"]:
                 raise WebError("This link cannot be downloaded. Attach an authorized video file instead.", 409)
-            if link["platform"] == "twitch" and not twitch_status(self.settings)["ok"]:
-                raise WebError("Configure current Twitch broadcaster/editor credentials in Settings first.", 409)
+            official = bool(link.get("clip_id") and twitch_status(self.settings)["ok"])
+            if descriptor.get("page_import") and not official:
+                importer = self.health()["link_import"]
+                if not importer["ok"] or (link["platform"] == "youtube" and not importer.get("youtube_ready", importer["ok"])):
+                    raise WebError("Check Link importer in Settings before importing this video.", 409)
             link.update(state="importing", message="Downloading the authorized video into your local library…")
             self._save_link(db, link)
             try:
@@ -398,24 +448,55 @@ class WebService:
             return {"deleted": link_id}
 
     def _import_link_task(self, db, job):
-        from .link_import import LinkError, VIDEO_EXTENSIONS, download_video, twitch_download
+        from .link_import import LinkError, VIDEO_EXTENSIONS, download_video, twitch_download, twitch_status, describe
         import urllib.parse
         link = self._link(db, job["payload"]["link_id"])
         target = None
         try:
             if link.get("source_id"):
-                job["result_message"] = "This source is already available in your library."
-                return
+                source = self._source(db, link["source_id"])
+                if self.source_record(source)["available"]:
+                    link.update(state="ready", message="This source is already available in your library.")
+                    self._save_link(db, link)
+                    job["result_message"] = link["message"]
+                    return
+                link["source_id"] = None
             url = link.get("private_url", link["url"])
             name = "Imported video"
-            if link["platform"] == "twitch":
+            official = bool(link.get("clip_id") and twitch_status(self.settings)["ok"])
+            if official:
                 url, name = twitch_download(self.settings, link["clip_id"])
             extension = Path(urllib.parse.unquote(urllib.parse.urlsplit(url).path)).suffix.lower()
             if extension not in VIDEO_EXTENSIONS:
                 extension = ".mp4"
             target = self.data_dir / "sources" / (uuid.uuid4().hex + extension)
-            self._stage(db, job, "downloading")
-            download_video(url, target, twitch=link["platform"] == "twitch", cancelled=self.stop.is_set)
+            last_progress = [0.0, ""]
+
+            def progress(stage, received=0, total=None):
+                now = time.monotonic()
+                if stage == last_progress[1] and now - last_progress[0] < .5:
+                    return
+                last_progress[:] = [now, stage]
+                if job.get("stage") != stage:
+                    self._stage(db, job, stage)
+                job.update(download_bytes=int(received), download_total_bytes=total)
+                if stage == "downloading":
+                    job["message"] = f"Downloading to this computer · {received / 1024**2:.1f} MiB received…"
+                    job["progress"] = min(85, 10 + 75 * received / total) if total else 20
+                self._save_job(db, job)
+
+            if describe(link["url"]).get("page_import") and not official:
+                from .page_import import page_download
+                result = page_download(url, target, ffmpeg=self.settings.render.ffmpeg,
+                                       cancelled=self.stop.is_set, progress=progress)
+                if Path(result["path"]).resolve() != target.resolve():
+                    raise LinkError("The downloaded video could not be registered safely.")
+                name = result["title"]
+            else:
+                self._stage(db, job, "downloading")
+                download_video(url, target, twitch=official, cancelled=self.stop.is_set,
+                               progress=lambda amount: progress("downloading", amount))
+            self._stage(db, job, "verifying")
             source = self.register_source(target, name + extension)
             # Use this worker connection to install the complete association together.
             raw = self._source(db, source["id"])
@@ -431,6 +512,39 @@ class WebService:
             link.update(state="failed", message=message)
             self._save_link(db, link)
             raise WebError(message) from None
+
+    def delete_source(self, source_id, payload):
+        _strict_keys(payload, {"confirmed"})
+        if payload.get("confirmed") is not True:
+            raise WebError("Confirm you want to delete this source video. Finished clips will be kept.")
+        try:
+            with self.guard, self.engine_lock(), self.db() as db:
+                if self._active(db):
+                    raise WebError("Wait for the current tasks to finish before deleting a source video.", 409)
+                source = self._source(db, source_id)
+                path = self._managed_source_path(source)
+                if path is None:
+                    raise WebError("Only downloaded or uploaded source files managed by ClipForge can be deleted here. Original files imported by path are kept.", 409)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    raise WebError("The source file could not be deleted. Close other apps using it and try again.", 409) from None
+                # Keep source provenance and artifact associations as tombstones.
+                # Rendered MP4s/captions live in separate artifact directories.
+                for item in self._sources(db):
+                    if Path(item["path"]).resolve() == path.resolve():
+                        item.update(source_deleted=True, deleted_at=iso_now())
+                        db.conn.execute("UPDATE web_sources SET data=? WHERE id=?", (json.dumps(item), item["id"]))
+                        if item["id"] == source_id:
+                            source = item
+                        for row in db.conn.execute("SELECT data FROM web_links").fetchall():
+                            link = json.loads(row["data"])
+                            if link.get("source_id") == item["id"]:
+                                link.update(state="needs_file", source_id=None, message="Source video deleted. Finished clips are kept. Import or attach a video to make more clips.")
+                                self._save_link(db, link)
+                return {"deleted": source_id, "source": self.source_record(source)}
+        except Timeout:
+            raise WebError("A ClipForge task is using this workspace. Try deleting the source after it finishes.", 409) from None
 
     def get_clip(self, clip_id):
         with self.db() as db:
@@ -517,7 +631,7 @@ class WebService:
         _strict_keys(payload, {"source_id", "mode", "title", "framing", "start_s", "end_s", "caption_text", "rights_category", "permission_reference", "creator_credit", "contribution"})
         with self.guard, self.db() as db:
             source = self._source(db, _text(payload.get("source_id"), "source", 128))
-            if not Path(source["path"]).is_file():
+            if source.get("source_deleted") or not Path(source["path"]).is_file():
                 raise WebError("The original video was moved or deleted. Add it to the library again.", 409)
             mode = payload.get("mode", "manual")
             if mode not in {"manual", "ai"}:
@@ -576,6 +690,7 @@ class WebService:
                     "verifying": "Checking the rendered clip…", "authorizing": "Complete YouTube consent in the browser window…",
                     "publishing": "Sending the reviewed clip to YouTube…", "polling": "Checking YouTube processing status…", "revoking": "Disconnecting YouTube…",
                     "downloading": "Downloading the authorized video into your local library…",
+                    "resolving": "Reading the video page for accessible media…", "merging": "Combining the downloaded audio and video locally…",
                     "social_publishing": "Sending the reviewed clip to the selected platform…",
                     "social_polling": "Checking the selected platform's processing status…"}
         job.update(stage=stage, message=messages.get(stage, stage.title()), progress={"preparing": 5, "rendering": 40, "verifying": 90}.get(stage, 20))
@@ -738,6 +853,8 @@ class WebService:
         with self.db() as db:
             if kind == "source":
                 source = self._source(db, entity_id)
+                if source.get("source_deleted"):
+                    raise WebError("This source video was deleted. Finished clips are still available.", 404)
                 path, name = Path(source["path"]), source["name"]
             else:
                 _, artifact = self._artifact(db, entity_id)

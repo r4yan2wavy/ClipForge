@@ -231,6 +231,8 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             self._json(self.service.register_source(data["path"]), 201)
         elif path == "/api/links":
             self._json(self.service.import_link(data), 202)
+        elif match := re.fullmatch(rf"/api/sources/({ENTITY})/delete", path):
+            self._json(self.service.delete_source(match[1], data))
         elif match := re.fullmatch(rf"/api/links/({ENTITY})/(attach|retry|delete)", path):
             action = {"attach": self.service.attach_link, "retry": self.service.retry_link, "delete": self.service.delete_link}[match[2]]
             result = action(match[1], data)

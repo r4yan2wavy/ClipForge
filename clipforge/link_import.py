@@ -1,6 +1,6 @@
-"""Explicit, bounded HTTPS video imports and official Twitch clip access.
+"""Bounded HTTPS file imports, link classification and official Twitch access.
 
-Platform watch pages are references, never passed to a scraper or FFmpeg.
+The separate page_import module runs yt-dlp for supported public video pages.
 DNS answers are checked and pinned to the TLS connection on every redirect.
 """
 from __future__ import annotations
@@ -61,7 +61,7 @@ def describe(value):
     parts, host = parse_url(value)
     path = parts.path or "/"
     clean = urllib.parse.urlunsplit(("https", host, path, "", ""))
-    platform, clip_id = "direct", None
+    platform, clip_id, page_import = "direct", None, False
     if _host_is(host, "youtube.com") or host == "youtu.be":
         platform = "youtube"
         if host == "youtu.be":
@@ -74,6 +74,7 @@ def describe(value):
         if not re.fullmatch(r"[A-Za-z0-9_-]{11}", identifier):
             raise LinkError("Paste a YouTube video, Shorts, or recording link.")
         clean = "https://www.youtube.com/watch?v=" + identifier
+        page_import = True
     elif _host_is(host, "twitch.tv"):
         platform = "twitch"
         if host == "clips.twitch.tv":
@@ -84,8 +85,21 @@ def describe(value):
         if candidate and re.fullmatch(r"[A-Za-z0-9_-]{1,150}", candidate):
             clip_id = candidate
             clean = "https://clips.twitch.tv/" + clip_id
+            page_import = True
+        elif re.fullmatch(r"/(?:[^/]+/)?videos/\d{1,30}/?", path):
+            video_id = path.strip("/").split("/")[-1]
+            clean = "https://www.twitch.tv/videos/" + video_id
+            page_import = True
     elif _host_is(host, "kick.com"):
         platform = "kick"
+        clip = urllib.parse.parse_qs(parts.query).get("clip", [""])[0]
+        if re.fullmatch(r"/[A-Za-z0-9_-]+/?", path) and re.fullmatch(r"clip_[A-Za-z0-9_-]{1,150}", clip):
+            clean = "https://kick.com" + path.rstrip("/") + "/clips/" + clip
+            page_import = True
+        elif re.fullmatch(r"/[A-Za-z0-9_-]+/clips/clip_[A-Za-z0-9_-]{1,150}/?", path):
+            page_import = True
+        elif re.fullmatch(r"/[A-Za-z0-9_-]+/videos/[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}/?", path):
+            page_import = True
     elif _host_is(host, "instagram.com"):
         platform = "instagram"
         if not re.fullmatch(r"/(?:p|reel|reels|tv)/[A-Za-z0-9_-]+/?", path):
@@ -98,11 +112,11 @@ def describe(value):
         raise LinkError("Paste a specific video or clip link, rather than the platform home page.")
     if platform == "direct" and Path(urllib.parse.unquote(path)).suffix.lower() not in VIDEO_EXTENSIONS:
         raise LinkError("For a direct download, use an HTTPS video-file link such as .mp4 or .mov. Supported platform post links can also be saved as references.")
-    downloadable = platform == "direct" or bool(clip_id)
+    downloadable = platform == "direct" or page_import
     message = ("Direct video link. Confirm you can download and edit this media." if platform == "direct" else
-               "A broadcaster or authorized editor token is required to import this Twitch clip." if clip_id else
+               "The local link importer can download this recording onto your computer. Availability depends on the video platform." if page_import else
                "Link saved as a reference. Attach an authorized video file to edit it; this platform page is not downloaded.")
-    return {"platform": platform, "url": clean, "clip_id": clip_id, "can_download": downloadable, "message": message}
+    return {"platform": platform, "url": clean, "clip_id": clip_id, "page_import": page_import, "can_download": downloadable, "message": message}
 
 
 def _credentials(settings):

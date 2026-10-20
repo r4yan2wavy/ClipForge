@@ -1,5 +1,30 @@
 # Validation record
 
+## Local yt-dlp imports and source cleanup, version 0.4.0
+
+All **117 focused tests** passed on Windows / Python 3.12 with the real
+configured FFmpeg/ffprobe. Checks cover the isolated yt-dlp worker, single-video
+URL classification, public-only DNS/socket connections, transfer/time/disk limits,
+secret-free errors, cancellation, no-overwrite publication, staging cleanup,
+explicit retries, old saved-link migration without automatic downloading, and
+app-token/source deletion protection. The real localhost flow rendered a clip,
+deleted its managed source, then downloaded the identical finished MP4 and
+captions successfully; external local-path originals and clip provenance remain.
+
+- Real yt-dlp 2026.08.19 downloaded the project's own 1,961,933-byte synthetic
+  GitHub sample through the production worker's guarded transport and prepared
+  an MP4 with FFmpeg. Only the provider metadata extractor was substituted for
+  this check, so it does not establish live platform media-download compatibility.
+- A separate live **metadata-only** YouTube check succeeded and reported 53
+  formats. No source video was downloaded in that provider check. No real
+  YouTube, Twitch or Kick video download or social publication was performed.
+- The current environment detects Node.js 24.21.0 and yt-dlp-ejs 0.8.0. Launchers
+  install missing link-import Python dependencies. Other installations need the
+  documented FFmpeg/ffprobe and, for YouTube, a supported Node.js/Deno runtime.
+- Browser inspection confirmed the updated Paste a link form and ready importer
+  state at localhost. JavaScript syntax checks passed. No existing user library
+  videos or saved links were downloaded or deleted during these checks.
+
 ## Linked video organization, version 0.3.1
 
 All **20 local studio service/HTTP tests** passed, including deletion consent,

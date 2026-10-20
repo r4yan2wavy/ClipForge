@@ -47,10 +47,10 @@ if errorlevel 1 (
     echo Rename the .venv folder, install a supported Python, and start ClipForge again.
     goto failed
 )
-".venv\Scripts\python.exe" -c "import pydantic, requests, filelock, tzdata; assert int(pydantic.__version__.split('.')[0]) == 2" >nul 2>&1
+".venv\Scripts\python.exe" -c "import pydantic, requests, filelock, tzdata, yt_dlp, yt_dlp_ejs; assert int(pydantic.__version__.split('.')[0]) == 2" >nul 2>&1
 if not errorlevel 1 goto launch
-echo Installing ClipForge's basic requirements. Internet is needed for this first setup.
-".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -e "."
+echo Installing ClipForge and its local link importer. Internet is needed for setup.
+".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -e ".[links]"
 if errorlevel 1 (
     echo Setup failed. Check your internet connection and the error above, then run this launcher again.
     echo FFmpeg, Ollama, and AI models must be installed separately; they are not downloaded here.

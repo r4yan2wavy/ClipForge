@@ -454,6 +454,120 @@ class StudioTest(unittest.TestCase):
             with self.assertRaises(WebError):
                 parse_range(value, 10)
 
+    def test_local_youtube_import_registers_file_progress_and_preserves_clean_link(self):
+        self.service.capabilities["link_import"] = {"ok": True}
+        def download(url, target, **kwargs):
+            self.assertEqual(url, "https://www.youtube.com/watch?v=abcdefghijk")
+            target.write_bytes(b"0123456789")
+            kwargs["progress"]("resolving", 0, None)
+            kwargs["progress"]("downloading", 10, 10)
+            kwargs["progress"]("merging", 10, 10)
+            return {"path": target, "title": "An original recording"}
+        with patch("clipforge.page_import.page_download", side_effect=download), patch("clipforge.web_service.run_command", return_value=SimpleNamespace(stdout=json.dumps(PROBE))):
+            result = self.service.import_link({"url": "https://youtu.be/abcdefghijk?tracking=private", "rights_confirmed": True})
+            job = self.wait_job(result["job"]["id"])
+        self.assertEqual(job["state"], "completed", job)
+        self.assertEqual(job["download_bytes"], 10)
+        library = self.service.library()
+        self.assertEqual(library["sources"][0]["name"], "An original recording.mp4")
+        self.assertTrue(library["sources"][0]["managed_file"])
+        self.assertEqual(library["links"][0]["state"], "ready")
+        self.assertNotIn("tracking=private", json.dumps(library))
+
+    def test_local_youtube_failure_is_visible_clean_and_explicitly_retryable(self):
+        from clipforge.link_import import LinkError
+        self.service.capabilities["link_import"] = {"ok": True}
+        def fail(url, target, **kwargs):
+            target.write_bytes(b"partial")
+            raise LinkError("This video needs an unsupported playback check. Upload the original file.")
+        with patch("clipforge.page_import.page_download", side_effect=fail):
+            result = self.service.import_link({"url": "https://youtu.be/abcdefghijk", "rights_confirmed": True})
+            job = self.wait_job(result["job"]["id"])
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("playback check", job["message"])
+        self.assertEqual(list((self.service.data_dir / "sources").iterdir()), [])
+        with patch.object(self.service, "health", return_value={"link_import": {"ok": True}}), patch.object(self.service.pending, "put"):
+            retried = self.service.retry_link(result["link"]["id"], {})
+        self.assertEqual(retried["link"]["state"], "importing")
+
+    def test_source_deletion_requires_consent_and_never_deletes_external_import(self):
+        source = self.source()
+        self.assertFalse(source["managed_file"])
+        for payload in ({}, {"confirmed": False}, {"confirmed": True}):
+            with self.assertRaises(WebError):
+                self.service.delete_source(source["id"], payload)
+        self.assertTrue((self.root / "owned.mp4").is_file())
+
+    def test_delete_managed_source_preserves_clip_artifacts_and_provenance_after_restart(self):
+        clip = self.render_fixture()
+        source = self.service.library()["sources"][0]
+        managed = self.service.data_dir / "sources" / ("a" * 32 + ".mp4")
+        managed.write_bytes(b"0123456789")
+        with self.service.db() as db:
+            raw = self.service._source(db, source["id"])
+            raw["path"] = str(managed)
+            db.conn.execute("UPDATE web_sources SET data=? WHERE id=?", (json.dumps(raw), source["id"]))
+        link = self.service.import_link({"url": "https://www.instagram.com/reel/ABC123/", "rights_confirmed": True})["link"]
+        self.service.attach_link(link["id"], {"source_id": source["id"]})
+        before, _ = self.service.media("clip", clip["id"])
+        clip_bytes = before.read_bytes()
+        result = self.service.delete_source(source["id"], {"confirmed": True})
+        self.assertFalse(managed.exists())
+        self.assertFalse(result["source"]["available"])
+        self.assertEqual(self.service.media("clip", clip["id"])[0].read_bytes(), clip_bytes)
+        self.assertEqual(self.service.get_clip(clip["id"])["id"], clip["id"])
+        self.assertEqual(self.service.library()["links"][0]["state"], "needs_file")
+        self.assertTrue((self.root / "owned.mp4").is_file())
+        with self.assertRaises(WebError):
+            self.service.enqueue_clip(self.payload(source))
+        with self.assertRaises(WebError):
+            self.service.media("source", source["id"])
+        self.service.close()
+        self.service = WebService(self.config)
+        self.assertEqual(self.service.library()["clips"][0]["id"], clip["id"])
+        self.assertFalse(self.service.library()["sources"][0]["available"])
+
+    def test_managed_source_deletion_rejects_active_job(self):
+        managed = self.service.data_dir / "sources" / ("b" * 32 + ".mp4")
+        managed.write_bytes(b"0123456789")
+        with patch("clipforge.web_service.run_command", return_value=SimpleNamespace(stdout=json.dumps(PROBE))):
+            source = self.service.register_source(managed)
+        with patch.object(self.service.pending, "put"):
+            self.service.enqueue_clip(self.payload(source))
+        self.assertFalse(self.service.library()["sources"][0]["can_delete_file"])
+        with self.assertRaises(WebError) as busy:
+            self.service.delete_source(source["id"], {"confirmed": True})
+        self.assertEqual(busy.exception.status, 409)
+        self.assertTrue(managed.is_file())
+
+    def test_old_saved_youtube_reference_upgrades_without_a_background_download(self):
+        with self.service.db() as db:
+            self.service._save_link(db, {"id": "old-reference", "url": "https://www.youtube.com/watch?v=abcdefghijk",
+                "platform": "youtube", "clip_id": None, "state": "needs_file", "source_id": None,
+                "can_download": False, "message": "Old reference", "created_at": iso_now()})
+        self.service.close()
+        self.service = WebService(self.config)
+        library = self.service.library()
+        self.assertEqual(library["jobs"], [])
+        self.assertTrue(library["links"][0]["can_download"])
+        self.assertEqual(library["links"][0]["state"], "needs_file")
+        self.assertIn("Import video", library["links"][0]["message"])
+
+    def test_missing_source_can_be_reimported_without_sticking_the_link(self):
+        source = self.source()
+        result = self.service.import_link({"url": "https://youtu.be/abcdefghijk", "rights_confirmed": True})
+        self.service.attach_link(result["link"]["id"], {"source_id": source["id"]})
+        (self.root / "owned.mp4").unlink()
+        def download(url, target, **kwargs):
+            target.write_bytes(b"0123456789")
+            return {"path": target, "title": "Restored original"}
+        with patch.object(self.service, "health", return_value={"link_import": {"ok": True}}), patch("clipforge.page_import.page_download", side_effect=download), patch("clipforge.web_service.run_command", return_value=SimpleNamespace(stdout=json.dumps(PROBE))):
+            retry = self.service.retry_link(result["link"]["id"], {})
+            self.assertEqual(self.wait_job(retry["job"]["id"])["state"], "completed")
+        link = self.service.library()["links"][0]
+        self.assertEqual(link["state"], "ready")
+        self.assertNotEqual(link["source_id"], source["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

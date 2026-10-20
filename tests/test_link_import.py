@@ -71,10 +71,27 @@ def test_reference_classification_and_signed_link_redaction():
     assert direct["can_download"] is True
     assert direct["url"] == "https://media.example.com/original.mp4"
     youtube = links.describe("https://youtu.be/abcdefghijk?tracking=PRIVATE")
-    assert youtube["platform"] == "youtube" and youtube["can_download"] is False
+    assert youtube["platform"] == "youtube" and youtube["can_download"] is True
     assert youtube["url"] == "https://www.youtube.com/watch?v=abcdefghijk"
-    assert links.describe("https://www.twitch.tv/owner/videos/123")["can_download"] is False
+    assert links.describe("https://www.twitch.tv/owner/videos/123")["can_download"] is True
     assert links.describe("https://clips.twitch.tv/ARealClipSlug")["clip_id"] == "ARealClipSlug"
+
+
+def test_only_specific_recording_links_enter_the_local_page_importer():
+    cases = [
+        ("https://www.twitch.tv/videos/123", "https://www.twitch.tv/videos/123"),
+        ("https://kick.com/owner/videos/5c697a87-afce-4256-b01f-3c8fe71ef5cb", None),
+        ("https://kick.com/owner?clip=clip_123&tracking=PRIVATE", "https://kick.com/owner/clips/clip_123"),
+        ("https://kick.com/owner/clips/clip_123", None),
+    ]
+    for url, clean in cases:
+        result = links.describe(url)
+        assert result["can_download"] and result["page_import"]
+        if clean:
+            assert result["url"] == clean
+    for url in ("https://kick.com/owner", "https://www.twitch.tv/owner", "https://www.instagram.com/reel/ABCD/"):
+        result = links.describe(url)
+        assert not result["can_download"] and not result["page_import"]
 
 
 @pytest.mark.parametrize("host", ["r1.googlevideo.com", "video.fbcdn.net", "media.twitchcdn.net", "video.tiktokcdn.com"])

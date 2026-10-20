@@ -9,7 +9,7 @@ Turn your recordings into vertical clips in a browser studio running on your own
 3. On **Windows**, double-click **`Start-ClipForge.bat`**. On **macOS/Linux**, open a terminal in the extracted folder and run `bash ./start-clipforge.sh`.
 4. ClipForge opens your browser at **http://127.0.0.1:8000/**. Keep its terminal window open while working; press **Ctrl+C** there to stop it.
 
-The launcher creates a private `.venv` and installs the basic Python requirements on first use, which needs an internet connection. It does not install FFmpeg, Ollama or models. The app creates `config.json` if missing. In **Settings**, check FFmpeg and ffprobe; you can enter their full executable paths if they are not on PATH.
+The launcher creates a private `.venv` and installs the basic Python requirements and missing link-import dependencies, which needs an internet connection. It does not install FFmpeg, a JavaScript runtime, Ollama or models. The app creates `config.json` if missing. In **Settings**, check FFmpeg and ffprobe; you can enter their full executable paths if they are not on PATH. YouTube imports also need a supported [Deno](https://docs.deno.com/runtime/getting_started/installation/) or [Node.js](https://nodejs.org/en/download/) installation. If one is already available on PATH, ClipForge detects it; check link-import readiness before adding a YouTube link.
 
 Start in **Studio** with **Try a sample**, or add a recording you own or have permission to edit. Choose **Pick a moment** for a manual clip, set its start/end, select crop/fit/blur framing, and render. An optional text overlay shows the words you type for the whole cut; automatic speech captions require the separate AI setup. In **Clips**, preview the actual render, edit its title/description, review it, and download the MP4. The sample is a synthetic test pattern with tones, not speech, and cannot be published through the app.
 
@@ -17,7 +17,9 @@ Manual clips need only Python and FFmpeg. For AI, optional publishing setup, sav
 
 ## Add a link and choose where to publish
 
-The studio's link option downloads authorized **direct HTTPS video files** and eligible **Twitch clips through Twitch's official API**. A YouTube, Instagram, TikTok or other supported platform page is saved as a reference; attach your authorized original file to edit it. The [link guide](docs/link-import.md) explains which links produce media, how to attach a source, and Twitch account setup.
+The studio's link option downloads authorized **direct HTTPS video files**. For public **YouTube videos, Twitch VODs/clips and Kick VODs/clips**, it uses a local yt-dlp engine. When Twitch clip credentials are configured, those clips use Twitch's official download API instead. Instagram and TikTok pages remain saved references awaiting an authorized source file. Link availability depends on the site and its access restrictions; live streams, channels and playlist downloads are not supported. The [link guide](docs/link-import.md) explains setup, compatibility, limits and attaching a source.
+
+Link imports download the full source video onto your computer before editing. Processing uses your computer and needs no cloud subscription or paid downloader API. Downloads are limited to 10 GiB of media and a 30-minute overall job budget, with no fixed source-duration maximum. You can delete an app-managed source video after its jobs finish to free space; finished clips remain, but making more clips requires importing the source again. Existing saved references are not downloaded automatically when you update: choose their import action yourself.
 
 After reviewing a clip, use its YouTube, Instagram or TikTok publishing button. Each destination needs separate setup and explicit confirmation. Instagram requires a supported Professional account and a Page access token; TikTok requires approved Content Posting API access. These two integrations use private local credential JSON files rather than a built-in account sign-in flow. See the [social publishing guide](docs/social-publishing.md), including account/app restrictions and recovery after uncertain requests. TikTok's unaudited clients are limited to private accounts and private viewing; public access requires its review. [TikTok Direct Post requirements](https://developers.tiktok.com/docs/en/content-posting-api-get-started).
 
@@ -47,12 +49,13 @@ The CPU baseline is faster-whisper `small` with `int8`, followed sequentially by
 | Music | Local preapproved catalog | Verified license, permitted use, exact attribution |
 | Optional upload | google-auth, google-auth-oauthlib, Requests | Channel-owner consent, Desktop OAuth client |
 | Direct video links / Twitch clips | Requests / official Twitch API | Public HTTPS media, or authorized broadcaster/editor token |
+| YouTube / Twitch / Kick page imports | Optional yt-dlp Python package, FFmpeg | Supported public single-video links; YouTube also needs Deno or Node.js and the installed EJS helper |
 | Optional Instagram / TikTok | Requests, official platform APIs | Eligible accounts, approved app scopes, private local token files |
 | Scheduling | cron, Windows Task Scheduler or CLI loop | Computer awake, correct account/environment/absolute paths |
 
 ## Advanced CLI and AI setup
 
-These steps prepare the full command-line, local AI and optional YouTube workflow. For manual cuts in the browser app, use the simpler launch instructions above; Ollama and speech models are optional. Instagram, TikTok and Twitch use the base Requests dependency and the separate credential setup linked above.
+These steps prepare the full command-line, local AI and optional YouTube workflow. For manual cuts in the browser app, use the simpler launch instructions above; Ollama and speech models are optional. Instagram, TikTok and official Twitch clip imports use the base Requests dependency and the separate credential setup linked above. Page imports use the optional `links` extra described in the link guide.
 
 Install Python 3.11 or newer, [FFmpeg](https://ffmpeg.org/download.html) including **ffprobe** and libass, and [Ollama](https://ollama.com/download). Test both executables, and check `ffmpeg -filters` contains `ass`, `sidechaincompress` and `loudnorm`. FFmpeg's licensing depends on the selected build; follow its notices when redistributing binaries. This project does not bundle FFmpeg or model weights.
 
@@ -209,7 +212,11 @@ python -m clipforge forget-discovery --video-id SOURCE_VIDEO_ID
 
 An API key is for discovery; upload requires owner OAuth. Raw discovery candidates wait for authorized originals. Manifests record file path, optional video ID/URL, rights category and reference, exact creator credit, optional local music/attribution, contribution, approval state, declarations and optional schedule. Missing media yields `WAITING_MEDIA`. A written rights reference is an operator assertion to verify, not an automated license check.
 
-The starter deliberately does not use `yt-dlp` or `youtube-transcript-api`. Those tools can technically access some streams/transcripts, but availability varies with account, caption, access and platform constraints. Their technical capability grants no license or API permission. They must not be used as automated workarounds for quotas, access blocks or restrictions. Creator-provided subtitles and local transcription are implemented. `captions.list` lists track metadata, not caption text; authorized `captions.download` requires sufficient video editing permission. That optional OAuth caption-download integration remains unimplemented. [Caption list](https://developers.google.com/youtube/data/reference/rest/v3/captions/list), [caption download](https://developers.google.com/youtube/data/reference/rest/v3/captions/download).
+The browser studio has a separate local page-import route powered by the optional `links` extra (`yt-dlp[default]>=2025.11.12,<2028`). The launchers install missing link dependencies; an existing Python environment can use `python -m pip install -e ".[links]"`. It supports public single-video YouTube, Twitch VOD/clip and Kick VOD/clip links within the app's limits, downloading and merging the source locally. YouTube needs a supported Deno or Node.js runtime plus the EJS helper installed by that Python extra. ClipForge selects Deno first, then Node.js, and does not automatically fetch remote JavaScript components. See the [setup and compatibility guide](docs/link-import.md).
+
+ClipForge does not use browser cookies, account login, DRM decryption or access-control bypasses. Live streams, channel pages and playlists are excluded. Compatibility can change; use an authorized original file when a link cannot import. Access to a public video does not establish download or reuse permission, and platform terms still apply. [YouTube terms](https://www.youtube.com/static?template=terms).
+
+Creator-provided subtitles and local transcription are implemented; `youtube-transcript-api` is not used. `captions.list` lists track metadata, not caption text; authorized `captions.download` requires sufficient video editing permission. That optional OAuth caption-download integration remains unimplemented. [Caption list](https://developers.google.com/youtube/data/reference/rest/v3/captions/list), [caption download](https://developers.google.com/youtube/data/reference/rest/v3/captions/download).
 
 ## Module 2 — local transcription and grounded selection
 
@@ -305,6 +312,7 @@ clipforge/
   factory.py      deterministic FFmpeg rendering, music, output verification
   upload.py       owner OAuth, durable resumable transfer and publication polling
   link_import.py bounded HTTPS file imports and official Twitch clip downloads
+  page_import.py local yt-dlp page imports, dependency checks and transfer limits
   social_publish.py official Instagram/TikTok transfers and publication state
   web.py          loopback HTTP server, local origin protection and media routes
   web_service.py  persistent browser library, job queue and review actions
@@ -322,7 +330,7 @@ prepared/         generated clips and reviewable artifacts (ignored)
 secrets/          owner OAuth credentials (ignored)
 ```
 
-Implemented: the local browser studio and preparation path, authorized direct-link/Twitch imports, platform references with attached originals, discovery/monitoring, gated trend formulas, caption formats, three framing modes, optional catalog music and ducking, metadata/credits, review states, checksum caches, OS lock, finite job retries, UTC slot reservation, opt-in YouTube OAuth/resumable upload, Instagram Reels/TikTok API publishing and status checks. Tests run offline with real FFmpeg where available; network integrations use mocks.
+Implemented: the local browser studio and preparation path, direct-link/official Twitch clip imports, yt-dlp imports for supported public YouTube/Twitch/Kick videos, platform references with attached originals, app-managed source removal while preserving finished clips, discovery/monitoring, gated trend formulas, caption formats, three framing modes, optional catalog music and ducking, metadata/credits, review states, checksum caches, OS lock, finite job retries, UTC slot reservation, opt-in YouTube OAuth/resumable upload, Instagram Reels/TikTok API publishing and status checks. See [VERIFICATION.md](VERIFICATION.md) for the checks actually run and the limits of network validation.
 
 Optional extensions: face tracking/speaker association, richer slot calendars, two-pass loudness mastering, final-edit narration, automatic substantive editorial augmentation, multi-worker transactional claims and alerts.
 

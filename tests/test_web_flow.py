@@ -106,6 +106,16 @@ class LocalStudioFlowTests(unittest.TestCase):
                 status, _, _ = request("POST", "/api/clips/" + clip["id"] + "/publish", {
                     "confirmed": True, "made_for_kids": False, "contains_synthetic_media": False, "schedule": None})
                 self.assertEqual(status, 409, "Uploads remain disabled without explicit configuration")
+                # The rendered MP4 and captions are self-contained after original cleanup.
+                source_id = library["sources"][0]["id"]
+                status, _, body = request("POST", f"/api/sources/{source_id}/delete", {"confirmed": True})
+                self.assertEqual(status, 200, body)
+                self.assertFalse(json.loads(body)["source"]["available"])
+                self.assertEqual(request("GET", f"/media/source/{source_id}")[0], 404)
+                status, _, after_delete = request("GET", clip["download_url"])
+                self.assertEqual(status, 200)
+                self.assertEqual(after_delete, video_bytes)
+                self.assertEqual(request("GET", clip["caption_url"])[2], captions)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

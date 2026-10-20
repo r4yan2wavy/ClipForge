@@ -9,7 +9,7 @@ Download the repository ZIP from GitHub and extract all of it into a writable fo
 - **Windows:** double-click `Start-ClipForge.bat`.
 - **macOS/Linux:** open a terminal in the project folder and run `bash ./start-clipforge.sh`.
 
-The first launch creates `.venv` and installs the basic Python dependencies from the package index. It needs internet access for those downloads. Later launches reuse that environment. No speech models, Ollama models or FFmpeg binaries are downloaded by the launcher.
+The first launch creates `.venv` and installs the basic Python dependencies and missing link-import packages from the package index. It needs internet access for those downloads. Later launches reuse that environment and install missing link dependencies when needed. No speech models, Ollama models, FFmpeg binaries or JavaScript runtime are downloaded by the launcher.
 
 Keep the launcher terminal open while using the app. Closing only the browser tab leaves the server running. Press **Ctrl+C** in the terminal to stop it; on Windows, confirm the batch termination prompt if one appears. Let an active render finish first. A job interrupted by shutdown can be retried from the app after restarting.
 
@@ -37,7 +37,7 @@ The server binds to `127.0.0.1`, so the app is available on this computer. Keep 
 ## Make your first clip
 
 1. Open **Settings** and check the prerequisites. The manual editor needs FFmpeg and ffprobe. Enter their full paths if your installed executables are not on PATH, save, and check again.
-2. Open **Studio** and add a video. Browser upload copies a file into ClipForge's workspace. Importing an existing local file by its full path registers that file in place; keep it at that path while it is in use. The link option downloads eligible direct HTTPS media/Twitch clips or saves a platform reference awaiting your authorized original. **Try a sample** registers the included synthetic test pattern and tones.
+2. Open **Studio** and add a video. Browser upload copies a file into ClipForge's workspace. Importing an existing local file by its full path registers that file in place; keep it at that path while it is in use. The link option downloads eligible direct HTTPS media or public YouTube/Twitch/Kick videos, or saves a platform reference awaiting your authorized original. **Try a sample** registers the included synthetic test pattern and tones.
 3. Choose **Pick a moment** for manual mode, enter a title, and set a start and end inside the source. A manual cut can be 1–180 seconds. Confirm you own the recording or have permission to edit it, and complete its rights/credit information.
 4. Choose framing: **center crop** fills the vertical frame and trims the sides; **fit** preserves the whole image with padding; **blur** fits the image over a blurred background. Optional manual text is a static overlay for the entire cut. It does not listen to the audio or generate timed subtitles.
 5. Render the clip. The job list shows its current processing stage. Progress follows stages; it is not a precise FFmpeg percentage.
@@ -47,9 +47,13 @@ Manual mode performs a real local render. It does not run speech recognition or 
 
 ## Add a link
 
-Choose **Paste a link** in Studio to add an authorized direct HTTPS video, Twitch clip, or platform page. Direct files download into the workspace; Twitch clip downloads need a broadcaster/editor OAuth token in a private file. Other platform pages appear under **Linked videos** as **Video file needed**. Choose **Attach a video** to select an authorized library source or upload your original before editing.
+Choose **Paste a link** in Studio to add an authorized direct HTTPS video or public YouTube video, Twitch VOD/clip or Kick VOD/clip. The page importer uses yt-dlp locally within this app, with no paid cloud API or subscription. Public Twitch clips use the official download API when broadcaster/editor credentials are configured, otherwise the local page importer. Existing saved references only import when you explicitly choose **Import video**.
 
-The app does not scrape arbitrary platform streams. There must be real media in the library before a reference can produce a clip. See the [link import guide](link-import.md) for supported flows, limits, Twitch credentials and handling signed URLs. Downloading a linked file uses an internet connection even though subsequent rendering stays local.
+The launcher installs missing link-import Python dependencies. An existing environment can install them with `.venv\Scripts\python.exe -m pip install -e ".[links]"` on Windows or `.venv/bin/python -m pip install -e '.[links]'` on macOS/Linux. YouTube also needs Deno 2.3+ or Node.js 22+ on PATH; an existing supported installation is enough. ClipForge detects Deno first, then Node.js, and reports missing prerequisites in readiness checks. It uses the EJS helper supplied by the Python package rather than downloading remote JavaScript components. See the [link setup guide](link-import.md) for installation links and updates.
+
+Instagram/TikTok pages appear under **Linked videos** as **Video file needed**. Choose **Attach a video** to select an authorized library source or upload your original before editing. Failed link imports can also use an attached file. Live streams, channels, playlists, login/cookie-dependent and protected content are excluded. Site changes and access/bot checks can still make public links fail. Check that downloading and using the media is permitted under its rights and the site's terms.
+
+An import downloads the full source onto your PC, with a 10 GiB combined-media limit and a 30-minute overall budget. There is no fixed source-duration maximum; large/slow transfers may hit those limits. FFmpeg may combine separate downloaded audio/video files. Subsequent editing and optional AI also run locally, so there is no paid processing subscription. Your computer needs enough disk space and must remain on until the job finishes.
 
 ## Add local AI
 
@@ -115,6 +119,8 @@ The default workspace is the project folder. `config.json` holds settings. `data
 
 Keep those folders when updating the application. Back up the whole workspace if you need its history and original uploaded files. A local-path import continues to depend on the original file outside the workspace. Model files and videos can use substantial disk space. Downloaded MP4 files are saved wherever your browser normally saves downloads.
 
+To reclaim space after rendering, choose **Delete source video** on an app-managed downloaded or browser-uploaded source and confirm. Wait until jobs using it finish. This deletes the source file while preserving finished clips and their metadata. The source is recorded as unavailable; import/upload it again to make more clips. The app never deletes an original external file registered by its local path. Deleting a **Linked videos** card removes only the reference, not its source file.
+
 For a separate workspace, use an absolute config path:
 
 ```powershell
@@ -131,7 +137,7 @@ A missing config is created with defaults. `paths.root` defaults to the config f
 
 The browser interface uses files served by the local application, with no hosted fonts, scripts or analytics. The server accepts local requests and protects state changes with an app token and origin checks. The browser is not given OAuth tokens or upload-session URLs.
 
-Manual rendering needs no external service. AI inference uses local speech weights and loopback Ollama. Installing software and downloading models requires internet access. Explicit direct-link imports connect to the file's host; Twitch imports validate the token and connect to Twitch/download hosts. Optional publishing and status checks connect to the selected YouTube, Instagram or TikTok services, and YouTube authorization/revocation uses Google. Opening an original link contacts that website in your browser. The separate CLI discovery commands connect to YouTube when invoked. Keep credentials, signed source URLs, private recordings, model files and runtime data out of public repositories.
+Manual rendering needs no external service. AI inference uses local speech weights and loopback Ollama. Installing software and downloading models requires internet access. Explicit direct-link imports connect to the file's host; yt-dlp imports connect to the selected YouTube/Twitch/Kick site and its media hosts; official Twitch imports validate the token and connect to Twitch/download hosts. Optional publishing and status checks connect to the selected YouTube, Instagram or TikTok services, and YouTube authorization/revocation uses Google. Opening an original link contacts that website in your browser. The separate CLI discovery commands connect to YouTube when invoked. Keep credentials, signed source URLs, private recordings, model files and runtime data out of public repositories.
 
 ## Troubleshooting
 
@@ -143,7 +149,8 @@ Manual rendering needs no external service. AI inference uses local speech weigh
 - **A job failed or was interrupted:** read its message and fix the missing file/tool or invalid setting before retrying. Keep imported source files in place. Restarting does not resume a partially written render automatically.
 - **No automatic timed captions in manual mode:** its optional text is a fixed overlay. Use AI mode after installing local inference tools for speech-based captions.
 - **A platform link says it needs a file:** it is a saved reference. Upload/import your authorized original and attach that source. A webpage is not automatically a downloadable video.
-- **Twitch import cannot authorize:** check the token's app ID, broadcaster/editor IDs, granted clip-management scope and real expiration; obtain a renewed authorized token externally if needed.
+- **A YouTube/Twitch/Kick link cannot import:** check link dependencies, FFmpeg/ffprobe and YouTube's Deno/Node.js prerequisite. Update the `links` extra after site changes. Login-required/protected videos, live streams, channels and playlists are excluded; bot/region/access restrictions may also stop a public link. Attach an authorized original when import is unavailable.
+- **Official Twitch clip import cannot authorize:** check the configured token's app ID, broadcaster/editor IDs, granted clip-management scope and real expiration; obtain a renewed authorized token externally if needed.
 - **Instagram/TikTok rejects publication:** check the private token file, account/app permissions, current provider limits and destination-specific status. Update expired tokens through the provider's OAuth process. Read the [recovery guide](social-publishing.md) before retrying an uncertain submission.
 
 See [README.md](../README.md) for the full command-line pipeline, architecture, policies and current verification scope.
