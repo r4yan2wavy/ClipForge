@@ -87,6 +87,18 @@ Restart ClipForge and enter the speech-model directory and Ollama model name in 
 
 Choose **Let AI choose** to use AI mode. It transcribes locally, asks the local model to select grounded intervals, renders timed speech captions, and creates proposed metadata. Always review the resulting cuts and words. Model readiness checks confirm availability, not editorial accuracy.
 
+### Repair an existing AI installation
+
+If AI jobs failed with `TypeError` before captions started, an older ClipForge AI installation may have installed PyAV 19 alongside faster-whisper 1.2.1. Those versions are incompatible. ClipForge 0.4.1 constrains PyAV to a compatible version and checks the actual audio decoder in Settings.
+
+Stop ClipForge, update the project files, then run this in the project folder on Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[ai,links]"
+```
+
+On macOS/Linux use `.venv/bin/python -m pip install -e '.[ai,links]'`. Restart ClipForge, save Settings, and check setup. Existing speech models and videos do not need to be downloaded again. Keep one AI job running at a time. New unexpected processing errors report the failed stage and exception category; safe diagnostic locations are stored as `job_failure` events in the local database, without exception messages or credentials.
+
 ## Optional YouTube publishing
 
 Downloading a clip needs no Google account. Publishing from ClipForge requires your own YouTube channel, a Google project with the YouTube Data API enabled, a Desktop OAuth client JSON file, and the optional authentication dependencies. Follow the [complete OAuth and recovery guide](upload-notes.md).

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import gc
+import io
 import json
 import re
+import wave
 from pathlib import Path
 from typing import TypeVar
 
@@ -19,6 +21,24 @@ T = TypeVar("T", bound=BaseModel)
 
 class ReviewRequired(ValueError):
     pass
+
+
+def check_speech_runtime():
+    """Exercise the installed decoder without loading or downloading a model."""
+    from faster_whisper.audio import decode_audio
+    audio = io.BytesIO()
+    with wave.open(audio, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\0\0" * 160)
+    audio.seek(0)
+    try:
+        decode_audio(audio, sampling_rate=16000)
+    except TypeError as error:
+        if "metadata_errors" in str(error):
+            raise ReviewRequired("Whisper's audio reader is incompatible. Repair the AI installation and restart ClipForge; see the local AI setup guide.") from error
+        raise
 
 
 def prompt(name: str) -> str:
@@ -109,6 +129,7 @@ def transcribe(settings: Settings, media_path: Path, source_sha: str,
         model_dir = settings.resolve(speech.model)
         if not model_dir.is_dir():
             raise ReviewRequired("Whisper model missing; download locally during setup")
+        check_speech_runtime()
         from faster_whisper import WhisperModel
         audio = cache.with_suffix(".wav")
         audio.parent.mkdir(parents=True, exist_ok=True)

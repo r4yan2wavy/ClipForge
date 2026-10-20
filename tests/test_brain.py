@@ -3,15 +3,17 @@ import json
 import math
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 import wave
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import Mock, patch
 
 from pydantic import ValidationError
 
-from clipforge.brain import (LocalLLM, ReviewRequired, extract_audio, load_subtitles, select_clips,
+from clipforge.brain import (LocalLLM, ReviewRequired, check_speech_runtime, extract_audio, load_subtitles, select_clips,
                              transcript_windows, validate_candidates)
 from clipforge.common import (BrainConfig, Candidate, CandidateList, Settings, Span,
                               Transcript, Word, run_command)
@@ -185,6 +187,23 @@ class LocalInferenceBoundaryTests(unittest.TestCase):
 
 
 class AudioTimelineTests(unittest.TestCase):
+    def test_speech_readiness_exercises_decoder_and_identifies_pyav_mismatch(self):
+        decoder = ModuleType("faster_whisper.audio")
+        def decode(stream, sampling_rate):
+            with wave.open(stream, "rb") as wav:
+                self.assertEqual((wav.getframerate(), wav.getnchannels(), wav.getsampwidth()), (16000, 1, 2))
+                self.assertEqual(sampling_rate, 16000)
+                self.assertGreater(len(wav.readframes(160)), 0)
+        decoder.decode_audio = decode
+        with patch.dict(sys.modules, {"faster_whisper": ModuleType("faster_whisper"), "faster_whisper.audio": decoder}):
+            check_speech_runtime()
+            decoder.decode_audio = Mock(side_effect=TypeError("open() got an unexpected keyword argument 'metadata_errors'"))
+            with self.assertRaisesRegex(ReviewRequired, "audio reader is incompatible"):
+                check_speech_runtime()
+            decoder.decode_audio = Mock(side_effect=TypeError("a different internal bug"))
+            with self.assertRaisesRegex(TypeError, "different internal bug"):
+                check_speech_runtime()
+
     def test_delayed_audio_extraction_keeps_video_zero_and_leading_silence(self):
         ffmpeg = os.environ.get("CLIPFORGE_TEST_FFMPEG") or shutil.which("ffmpeg")
         ffprobe = os.environ.get("CLIPFORGE_TEST_FFPROBE") or shutil.which("ffprobe")

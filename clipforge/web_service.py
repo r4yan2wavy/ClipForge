@@ -173,6 +173,14 @@ class WebService:
         result["speech"] = {"ok": speech_files and speech_installed, "message":
             "Local speech model is ready." if speech_files and speech_installed else
             "AI mode needs faster-whisper and a complete local speech model folder. Manual clips work without it."}
+        if speech_files and speech_installed:
+            from .brain import check_speech_runtime, ReviewRequired
+            try:
+                check_speech_runtime()
+            except ReviewRequired as error:
+                result["speech"] = {"ok": False, "message": str(error)}
+            except Exception:
+                result["speech"] = {"ok": False, "message": "Whisper's audio reader could not start. Repair the AI installation and restart ClipForge."}
         result["ollama"] = {"ok": False, "message": "Start Ollama and install the selected local model for AI mode. Manual clips work without it."}
         try:
             with requests.Session() as session:
@@ -771,7 +779,13 @@ class WebService:
                 reason = result.get("reason")
                 if reason and len(reason) < 400 and not any(x in reason.lower() for x in ("http", "token", "secret")):
                     raise WebError(reason)
-                raise WebError("AI processing needs a complete local Whisper model, running Ollama model and working FFmpeg. Check Settings, then retry.")
+                phase = {"preparing": "preparation", "transcribing": "speech transcription",
+                         "selecting": "clip selection", "rendering": "video rendering",
+                         "metadata": "writing clip details"}.get(result.get("stage"), "processing")
+                error_type = result.get("error_type", "")
+                # Only an identifier is safe to display; never expose exception text.
+                detail = f" ({error_type})" if isinstance(error_type, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_type) else ""
+                raise WebError(f"AI {phase} failed{detail}. The task needs investigation; repeating Retry may not fix it.")
         else:
             from .web_render import render_manual
             folder = self.settings.resolve(self.settings.paths.prepared) / ("manual-" + job["id"])

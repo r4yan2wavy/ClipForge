@@ -237,6 +237,19 @@ class PreparationTests(unittest.TestCase):
             self.assertTrue(self.prepare()["retry_limit"])
         self.assertEqual(self.db.conn.execute("SELECT attempts FROM jobs").fetchone()[0], 3)
 
+    def test_processing_failure_keeps_safe_stage_and_stack_without_exception_text(self):
+        sensitive = "https://private.invalid/?token=PRIVATE-CREDENTIAL"
+        with patch("clipforge.worker.transcribe", side_effect=TypeError(sensitive)):
+            result = self.prepare()
+        self.assertEqual((result["error_type"], result["stage"]), ("TypeError", "transcribing"))
+        detail = self.db.conn.execute("SELECT detail FROM events WHERE kind='job_failure'").fetchone()[0]
+        diagnostic = json.loads(detail)
+        self.assertEqual(diagnostic["stage"], "transcribing")
+        self.assertTrue(any(frame["file"] == "worker.py" for frame in diagnostic["frames"]))
+        self.assertNotIn("PRIVATE", detail)
+        self.assertNotIn(str(self.root), detail)
+
+
     def test_submitted_same_identity_cannot_be_regenerated_by_changed_inputs_or_retry(self):
         from clipforge import upload
 

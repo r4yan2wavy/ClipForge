@@ -1,0 +1,49 @@
+name: Publish ClipForge release
+
+on:
+  push:
+    branches: [main]
+    paths: [pyproject.toml, .github/workflows/release.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clipforge-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'r4yan2wavy/ClipForge' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check the release
+        run: |
+          python -m pip install -e '.[dev,links]'
+          python -m pytest -q
+      - name: Package the committed public source
+        id: package
+        run: python scripts/build_release.py
+      - name: Publish the version and downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CF_VERSION: ${{ steps.package.outputs.version }}
+          CF_TAG: ${{ steps.package.outputs.tag }}
+          CF_ARCHIVE: ${{ steps.package.outputs.archive }}
+          CF_NOTES: ${{ steps.package.outputs.notes }}
+        run: |
+          if gh release view "$CF_TAG" >/dev/null 2>&1; then
+            echo "Release $CF_TAG already exists; leaving it unchanged."
+            exit 0
+          fi
+          gh release create "$CF_TAG" "$CF_ARCHIVE" "$CF_ARCHIVE.sha256" \
+            --target "$GITHUB_SHA" --title "ClipForge $CF_VERSION" \
+            --notes-file "$CF_NOTES" --latest

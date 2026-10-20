@@ -182,6 +182,18 @@ class StudioTest(unittest.TestCase):
         self.assertTrue(prepare.call_args.kwargs["retry"])
         self.assertIn("No suitable", job["result_message"])
 
+    def test_ai_processing_failure_reports_stage_without_claiming_missing_setup(self):
+        source = self.source()
+        job = {"id": "ai-runtime-failure", "payload": dict(self.payload(source), mode="ai"), "source_id": source["id"]}
+        for error_type in ("TypeError", "https://private.invalid/?token=secret"):
+            with self.subTest(error_type=error_type), self.service.db() as db, patch("clipforge.worker.prepare_manifest",
+                    return_value={"state": "RETRY_WAIT", "stage": "transcribing", "error_type": error_type}):
+                with self.assertRaises(WebError) as caught:
+                    self.service._prepare(db, job)
+                self.assertIn("speech transcription failed", str(caught.exception))
+                self.assertNotIn("complete local Whisper", str(caught.exception))
+                self.assertNotIn("token=", str(caught.exception))
+
     def saved_publication(self):
         clip = self.render_fixture()
         self.service.approve(clip["id"], {"reviewed": True})

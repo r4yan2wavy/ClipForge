@@ -4,7 +4,7 @@ Turn your recordings into vertical clips in a browser studio running on your own
 
 ## Open the browser app
 
-1. Download this repository's ZIP and extract it into a writable folder, or clone the repository.
+1. Download the ZIP from **[GitHub Releases](https://github.com/r4yan2wavy/ClipForge/releases/latest)** and extract it into a writable folder, or clone the repository.
 2. Install **Python 3.11 or newer** and **[FFmpeg with ffprobe](https://ffmpeg.org/download.html)**. Your FFmpeg build needs libx264, AAC and libass. On Windows, enable Python's **Add Python to PATH** option during installation.
 3. On **Windows**, double-click **`Start-ClipForge.bat`**. On **macOS/Linux**, open a terminal in the extracted folder and run `bash ./start-clipforge.sh`.
 4. ClipForge opens your browser at **http://127.0.0.1:8000/**. Keep its terminal window open while working; press **Ctrl+C** there to stop it.

@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import os
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -57,6 +58,7 @@ def select_music(settings: Settings, manifest: SourceManifest, source_sha: str) 
 
 
 def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False) -> dict:
+    stage = "preparing"
     job_id = stable_id(str(path.resolve()))
     db.conn.execute("INSERT OR IGNORE INTO jobs(id,manifest_path,state,updated_at) VALUES(?,?,?,?)",
                     (job_id, str(path.resolve()), "NEW", iso_now()))
@@ -113,9 +115,11 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
         db.conn.execute("UPDATE jobs SET input_hash=?,state='TRANSCRIBING',attempts=?,error=NULL,updated_at=? WHERE id=?",
                         (input_hash, attempts, iso_now(), job_id))
         duration = probe_source(settings, media)
+        stage = "transcribing"
         transcript = transcribe(settings, media, source_sha, duration,
                                 settings.resolve(manifest.transcript_path) if manifest.transcript_path else None,
                                 model_digest=speech_digest)
+        stage = "selecting"
         db.set_job(job_id, "SELECTING")
         clips = select_clips(settings, transcript, llm,
                              settings.resolve(manifest.candidates_path) if manifest.candidates_path else None)
@@ -154,8 +158,10 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
                 review = True
                 frozen = True
                 continue
+            stage = "rendering"
             db.set_job(job_id, "RENDERING")
             rendered = render_clip(settings, media, transcript, candidate, manifest, folder)
+            stage = "metadata"
             metadata = append_credits(generate_metadata(settings, transcript, candidate, llm,
                                       settings.resolve(manifest.metadata_path) if manifest.metadata_path else None), manifest)
             approved = manifest.model_copy(deep=True)
@@ -194,8 +200,12 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
         previous = db.conn.execute("SELECT attempts FROM jobs WHERE id=?", (job_id,)).fetchone()
         state = "FAILED" if previous["attempts"] >= settings.max_job_attempts else "RETRY_WAIT"
         db.set_job(job_id, state, type(error).__name__)
-        log.error("Job %s failed (%s)", job_id[:12], type(error).__name__)
-        return {"job_id": job_id, "state": state, "error_type": type(error).__name__}
+        # Keep diagnostic locations, never exception messages, source URLs or locals.
+        frames = [{"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+                  for frame in traceback.extract_tb(error.__traceback__)]
+        db.event("job_failure", job_id, {"stage": stage, "error_type": type(error).__name__, "frames": frames})
+        log.error("Job %s failed during %s (%s)", job_id[:12], stage, type(error).__name__)
+        return {"job_id": job_id, "state": state, "stage": stage, "error_type": type(error).__name__}
 
 
 def retire_artifacts(db: DB, job_id: str, keep_ids: set[str]):

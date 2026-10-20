@@ -1,5 +1,15 @@
 # Validation record
 
+## Whisper audio repair, version 0.4.1
+
+Reproduced the user's crash with faster-whisper 1.2.1 and PyAV 19.0.1: `av.open()` rejected `metadata_errors` during audio decoding. Installing the AI extra now resolves PyAV 18.1.0. A real audio-decoder probe runs in Settings and before transcription. Unexpected worker failures retain the processing stage and safe stack locations in local diagnostic events; the UI no longer describes every processing exception as missing prerequisites.
+
+All **215 tests and 59 subtests** passed on Windows / Python 3.12 with FFmpeg and ffprobe, including new regression checks for decoder incompatibility, failure-stage reporting and excluding sensitive exception text from diagnostics.
+
+Real local Whisper transcription and local Ollama selection completed through HTTP on a synthetic 41.7-second spoken video without the crash. The automatic selector returned no candidates for that sample, which is an allowed editorial result. A separate fixed cut grounded in that actual Whisper transcript produced a **1080 × 1920 MP4 with 16 timed caption cues**, generated metadata using the configured local Ollama model, and passed checksum and full decoding verification. The caption-render check used a supplied selection, so it does not establish that the model will find good clips in any given source. No real social posts were submitted.
+
+The user's app was restarted with the repaired environment. Their 5-hour-25-minute recording was retained and was not processed in full as part of this verification.
+
 ## Local yt-dlp imports and source cleanup, version 0.4.0
 
 All **117 focused tests** passed on Windows / Python 3.12 with the real
