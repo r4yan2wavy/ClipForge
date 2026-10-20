@@ -275,6 +275,12 @@ class StudioTest(unittest.TestCase):
             self.assertEqual(request("GET", "/api/bootstrap", Origin="https://attacker.example")[0], 403)
             self.assertEqual(request("POST", "/api/demo", "{}", **{"Content-Type": "application/json"})[0], 403)
             auth = {"X-ClipForge-Token": token, "Content-Type": "application/json", "Origin": f"http://localhost:{port}"}
+            with self.service.db() as db:
+                self.service._save_job(db, {"id": "history-test", "kind": "clip", "state": "failed", "payload": {}, "source_id": source["id"]})
+            self.assertEqual(request("POST", "/api/jobs/history-test/delete", '{"confirmed":true}', **{"Content-Type": "application/json"})[0], 403)
+            self.assertEqual(request("POST", "/api/jobs/history-test/delete", '{"confirmed":false}', **auth)[0], 400)
+            self.assertEqual(request("POST", "/api/jobs/history-test/delete", '{"confirmed":true}', **auth)[0], 200)
+            self.assertEqual(request("POST", "/api/jobs/history-test/delete", '{"confirmed":true}', **auth)[0], 404)
             status, _, body = request("POST", "/api/links", json.dumps({"url": "https://www.youtube.com/watch?v=abcdefghijk", "rights_confirmed": True}), **auth)
             self.assertEqual(status, 202)
             link = json.loads(body)["link"]
@@ -551,6 +557,84 @@ class StudioTest(unittest.TestCase):
             self.service.delete_source(source["id"], {"confirmed": True})
         self.assertEqual(busy.exception.status, 409)
         self.assertTrue(managed.is_file())
+
+    def test_delete_workshop_history_preserves_source_clips_and_restart(self):
+        clip = self.render_fixture()
+        job = self.service.library()["jobs"][0]
+        original = self.root / "owned.mp4"
+        clip_path, _ = self.service.media("clip", clip["id"])
+        self.assertTrue(job["can_delete"])
+        for payload in ({}, {"confirmed": False}, {"confirmed": True, "delete_source": "false"}):
+            with self.assertRaises(WebError):
+                self.service.delete_job(job["id"], payload)
+        self.service.delete_job(job["id"], {"confirmed": True})
+        self.assertEqual(self.service.library()["jobs"], [])
+        self.assertTrue(original.is_file())
+        self.assertTrue(clip_path.is_file())
+        self.service.close()
+        self.service = WebService(self.config)
+        self.assertEqual(self.service.library()["jobs"], [])
+        self.assertEqual(self.service.get_clip(clip["id"])["id"], clip["id"])
+        with self.assertRaises(WebError) as gone:
+            self.service.retry(job["id"])
+        self.assertEqual(gone.exception.status, 404)
+
+    def test_workshop_source_cleanup_deletes_managed_file_and_keeps_clips(self):
+        clip = self.render_fixture()
+        job = self.service.library()["jobs"][0]
+        managed = self.service.data_dir / "sources" / ("c" * 32 + ".mp4")
+        managed.write_bytes(b"owned download")
+        with self.service.db() as db:
+            source = self.service._source(db, job["source_id"])
+            source["path"] = str(managed)
+            db.conn.execute("UPDATE web_sources SET data=? WHERE id=?", (json.dumps(source), source["id"]))
+        self.service.delete_job(job["id"], {"confirmed": True, "delete_source": True})
+        self.assertFalse(managed.exists())
+        self.assertTrue((self.root / "owned.mp4").is_file())
+        self.assertEqual(self.service.library()["jobs"], [])
+        self.assertTrue(self.service.media("clip", clip["id"])[0].is_file())
+
+    def test_workshop_cleanup_refuses_external_files_and_active_tasks(self):
+        source = self.source()
+        with patch.object(self.service.pending, "put"):
+            job = self.service.enqueue_clip(self.payload(source))["job"]
+        self.assertFalse(job["can_delete"])
+        for state in ("queued", "running", "failed", "interrupted"):
+            with self.service.db() as db:
+                raw = self.service._job(db, job["id"])
+                raw["state"] = state
+                self.service._save_job(db, raw)
+            with self.assertRaises(WebError):
+                self.service.delete_job(job["id"], {"confirmed": True, "delete_source": True})
+            self.assertTrue((self.root / "owned.mp4").is_file())
+            self.assertEqual(len(self.service.library()["jobs"]), 1)
+        self.service.delete_job(job["id"], {"confirmed": True})
+
+    def test_failed_file_cleanup_preserves_workshop_history(self):
+        clip = self.render_fixture()
+        job = self.service.library()["jobs"][0]
+        with patch.object(self.service, "delete_source", side_effect=WebError("File is in use", 409)):
+            with self.assertRaises(WebError):
+                self.service.delete_job(job["id"], {"confirmed": True, "delete_source": True})
+        self.assertEqual(self.service.library()["jobs"][0]["id"], job["id"])
+        self.assertTrue(self.service.media("clip", clip["id"])[0].is_file())
+
+    def test_link_cleanup_deletes_download_and_resolves_import_job_source(self):
+        def download(url, target, **kwargs):
+            target.write_bytes(b"downloaded video")
+        with patch("clipforge.link_import.download_video", side_effect=download), patch("clipforge.web_service.run_command", return_value=SimpleNamespace(stdout=json.dumps(PROBE))):
+            result = self.service.import_link({"url": "https://media.example.com/a.mp4", "rights_confirmed": True})
+            job = self.wait_job(result["job"]["id"])
+        with self.service.db() as db:
+            source_path = Path(self.service._source(db, job["source_id"])["path"])
+            # Old import history can resolve its source via the saved link too.
+            raw = self.service._job(db, job["id"])
+            raw["source_id"] = None
+            self.assertEqual(self.service.job_record(raw, db)["source_id"], job["source_id"])
+        self.service.delete_link(result["link"]["id"], {"confirmed": True, "delete_source": True})
+        self.assertFalse(source_path.exists())
+        self.assertEqual(self.service.library()["links"], [])
+        self.service.delete_job(job["id"], {"confirmed": True})
 
     def test_old_saved_youtube_reference_upgrades_without_a_background_download(self):
         with self.service.db() as db:

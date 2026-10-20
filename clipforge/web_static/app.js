@@ -146,12 +146,13 @@ function emptyState(symbol, title, description, suggestion = "") {
 }
 
 function renderSources() {
-  $("#source-count").textContent = state.sources.length;
-  if (!state.sources.length) {
+  const visibleSources = state.sources.filter((source) => !source.source_deleted);
+  $("#source-count").textContent = visibleSources.length;
+  if (!visibleSources.length) {
     $("#source-list").innerHTML = emptyState("film", "A blank canvas, for now.", "Add your first video above to get things rolling.", "Your next idea goes here");
     return;
   }
-  $("#source-list").innerHTML = state.sources.map((source) => {
+  $("#source-list").innerHTML = visibleSources.map((source) => {
     const available = availableSource(source);
     const url = available ? mediaUrl(source.url, "source") : "";
     return `<article class="source-row${available ? "" : " source-unavailable"}"><div class="source-thumb">${url ? `<video src="${esc(url)}#t=0.1" muted preload="metadata" aria-hidden="true" tabindex="-1"></video>` : icon("film")}</div><div class="source-info"><h3 title="${esc(source.name)}">${esc(source.name)}${sampleSource(source) ? '<span class="sample-badge">SAMPLE</span>' : ""}${available ? "" : `<span class="badge">${source.source_deleted ? "Source deleted" : "Source unavailable"}</span>`}</h3><p>${available ? `${esc(duration(source.duration_s))} <span aria-hidden="true">·</span> ${esc(source.width)} × ${esc(source.height)} <span aria-hidden="true">·</span> ${esc(bytes(source.bytes))}${source.has_audio === false ? " · No audio" : ""}` : "Finished clips are kept. Import the video again to create more clips."}</p></div><div class="source-actions">${available ? `<button class="button subtle small" type="button" data-create="${esc(source.id)}">${icon("scissors")} Create clip <span aria-hidden="true">↗</span></button>` : ""}${source.managed_file && available ? `<button class="text-button danger-text" type="button" data-source-delete="${esc(source.id)}" aria-label="Delete source video: ${esc(source.name)}" title="${source.can_delete_file ? "Delete the source file and keep finished clips" : "Wait for this source's jobs to finish before deleting it"}"${source.can_delete_file ? "" : " disabled"}>${icon("trash")} Delete source</button>` : ""}</div></article>`;
@@ -236,7 +237,7 @@ function renderJobs() {
     progress = Math.min(100, Math.max(2, progress));
     const progressLabel = job.mode === "link_import" ? `${jobLabel(job)}${downloadProgress ? ` · ${bytes(downloadBytes)} / ${bytes(downloadTotal)}` : ""}` : `${jobLabel(job)} · stage estimate`;
     const clipId = Array.isArray(job.clip_ids) ? job.clip_ids[0] : null;
-    return `<article class="job-row"><span class="job-icon${running ? " active" : failed ? " failed" : ""}">${icon(running ? "spinner" : failed ? "alert" : "check", running ? "loading-spinner" : "")}</span><div class="job-main"><h3>${esc(job.title || job.source_name || "Studio job")}</h3><p>${esc(job.message || job.source_name || jobLabel(job))}</p></div>${running ? `<div class="job-progress"><span>${esc(progressLabel)}</span><div class="progress-track"><span style="width:${progress}%"></span></div></div>` : canRetry ? `<button class="button subtle small" type="button" data-retry="${esc(job.id)}">${icon("refresh")} Retry</button>` : clipId ? `<button class="text-button" type="button" data-review="${esc(clipId)}">Review clip ↗</button>` : failed ? '<a class="text-button" href="#settings">Check settings ↗</a>' : `<span class="job-state">${esc(jobLabel(job))}</span>`}</article>`;
+    return `<article class="job-row"><span class="job-icon${running ? " active" : failed ? " failed" : ""}">${icon(running ? "spinner" : failed ? "alert" : "check", running ? "loading-spinner" : "")}</span><div class="job-main"><h3>${esc(job.title || job.source_name || "Studio job")}</h3><p>${esc(job.message || job.source_name || jobLabel(job))}</p></div><div class="job-actions">${running ? `<div class="job-progress"><span>${esc(progressLabel)}</span><div class="progress-track"><span style="width:${progress}%"></span></div></div>` : canRetry ? `<button class="button subtle small" type="button" data-retry="${esc(job.id)}">${icon("refresh")} Retry</button>` : clipId ? `<button class="text-button" type="button" data-review="${esc(clipId)}">Review clip ↗</button>` : failed ? '<a class="text-button" href="#settings">Check settings ↗</a>' : `<span class="job-state">${esc(jobLabel(job))}</span>`}${job.can_delete ? `<button class="text-button danger-text" type="button" data-job-delete="${esc(job.id)}" aria-label="Delete workshop item: ${esc(job.title || job.source_name || "Studio job")}">${icon("trash")} Delete</button>` : ""}</div></article>`;
   }).join("");
 }
 
@@ -598,6 +599,20 @@ function openReview(clipId) {
   $("#review-dialog").showModal();
 }
 
+function configureSourceCleanup(kind, sourceId, checked) {
+  const source = state.sources.find((item) => item.id === sourceId);
+  const available = source?.managed_file && availableSource(source);
+  const checkbox = $(`#delete-${kind}-form`).elements.delete_source;
+  $(`#delete-${kind}-source-option`).hidden = !available;
+  checkbox.disabled = !available || !source.can_delete_file;
+  checkbox.checked = available && source.can_delete_file && checked;
+  $(`#delete-${kind}-source-label`).textContent = available
+    ? `Also permanently delete the source video from this computer (${bytes(source.bytes)}). Finished clips are kept.`
+    : "";
+  $(`#delete-${kind}-source-note`).textContent = available && !source.can_delete_file
+    ? "Source video cleanup is available after the current tasks finish." : "";
+}
+
 async function retryJob(jobId, button) {
   button.disabled = true;
   try { await api(`/api/jobs/${encodeURIComponent(jobId)}/retry`, {}); toast("Job added back to the queue."); await refreshLibrary(); scheduleFastPoll(); }
@@ -692,6 +707,7 @@ function bindEvents() {
       if (!link || link.state === "importing") return;
       $("#delete-link-form").elements.link_id.value = linkId;
       $("#delete-link-url").textContent = link.url;
+      configureSourceCleanup("link", link.source_id, true);
       clearError("#delete-link-error");
       $("#delete-link-dialog").showModal();
       return;
@@ -712,11 +728,12 @@ function bindEvents() {
     clearError("#delete-link-error");
     const restore = startAction($("#delete-link-submit"), "Deleting…");
     try {
-      await api(`/api/links/${encodeURIComponent(linkId)}/delete`, {confirmed: true});
+      const deleteSource = event.currentTarget.elements.delete_source.checked;
+      await api(`/api/links/${encodeURIComponent(linkId)}/delete`, {confirmed: true, delete_source: deleteSource});
       if (state.attachLinkId === linkId) { state.attachLinkId = null; state.attachPendingUpload = false; if ($("#attach-dialog").open) $("#attach-dialog").close(); }
       $("#delete-link-dialog").close();
       await refreshLibrary();
-      toast("Saved link deleted.");
+      toast(deleteSource ? "Saved link and source video deleted from this computer. Finished clips kept." : "Saved link deleted. Video files are kept.");
     } catch (error) { showError("#delete-link-error", error); }
     finally { restore(); }
   });
@@ -730,7 +747,37 @@ function bindEvents() {
     finally { restore(); }
   });
   $("#attach-upload").addEventListener("click", () => { state.attachPendingUpload = true; $("#attach-dialog").close(); $("#video-file").click(); });
-  $("#job-list").addEventListener("click", (event) => { const retry = event.target.closest("[data-retry]"); const review = event.target.closest("[data-review]"); if (retry) retryJob(retry.dataset.retry, retry); if (review) openReview(review.dataset.review); });
+  $("#job-list").addEventListener("click", (event) => {
+    const retry = event.target.closest("[data-retry]");
+    const review = event.target.closest("[data-review]");
+    const remove = event.target.closest("[data-job-delete]");
+    if (retry) retryJob(retry.dataset.retry, retry);
+    if (review) openReview(review.dataset.review);
+    if (remove) {
+      const job = state.jobs.find((item) => item.id === remove.dataset.jobDelete);
+      if (!job?.can_delete) return;
+      $("#delete-job-form").elements.job_id.value = job.id;
+      $("#delete-job-name").textContent = job.title || job.source_name || "Studio job";
+      configureSourceCleanup("job", job.source_id, false);
+      clearError("#delete-job-error");
+      $("#delete-job-dialog").showModal();
+    }
+  });
+  $("#delete-job-cancel").addEventListener("click", () => $("#delete-job-dialog").close());
+  $("#delete-job-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fields = event.currentTarget.elements;
+    const deleteSource = fields.delete_source.checked;
+    const restore = startAction($("#delete-job-submit"), "Deleting…");
+    clearError("#delete-job-error");
+    try {
+      await api(`/api/jobs/${encodeURIComponent(fields.job_id.value)}/delete`, {confirmed: true, delete_source: deleteSource});
+      $("#delete-job-dialog").close();
+      await refreshLibrary();
+      toast(deleteSource ? "Workshop item and source video deleted from this computer. Finished clips kept." : "Workshop item deleted. Your videos and clips are kept.");
+    } catch (error) { showError("#delete-job-error", error); }
+    finally { restore(); }
+  });
   $("#clip-grid").addEventListener("click", (event) => { const button = event.target.closest("[data-review]"); if (button) openReview(button.dataset.review); });
   $("#clip-filter").addEventListener("change", renderClips);
   $("#import-path").addEventListener("click", () => { clearError("#path-error"); $("#path-dialog").showModal(); });

@@ -254,6 +254,8 @@ class WebService:
 
     def job_record(self, job, db):
         record = {k: v for k, v in job.items() if k not in {"payload", "engine_id", "kind", "retry_requested"}}
+        record["can_delete"] = job["state"] in {"completed", "failed", "interrupted"}
+        record["source_id"] = self._job_source_id(db, job)
         if job.get("kind", "").startswith("social_"):
             record["platform"] = job["payload"]["platform"]
             record["target_clip_id"] = job["payload"]["clip_id"]
@@ -264,6 +266,15 @@ class WebService:
                 record.update(stage=stage, progress={"transcribing": 20, "selecting": 45, "rendering": 65}[stage],
                               message={"transcribing": "Transcribing speech locally…", "selecting": "Finding clips with your local model…", "rendering": "Rendering vertical clips…"}[stage])
         return record
+
+    def _job_source_id(self, db, job):
+        if job.get("source_id"):
+            return job["source_id"]
+        if job.get("kind") == "link_import":
+            row = db.conn.execute("SELECT data FROM web_links WHERE id=?", (job.get("payload", {}).get("link_id"),)).fetchone()
+            if row:
+                return json.loads(row["data"]).get("source_id")
+        return None
 
     def _artifact(self, db, clip_id):
         row = db.conn.execute("SELECT * FROM artifacts WHERE clip_id=? AND active=1", (clip_id,)).fetchone()
@@ -436,9 +447,11 @@ class WebService:
             return {"link": self.link_record(link), **result}
 
     def delete_link(self, link_id, payload):
-        _strict_keys(payload, {"confirmed"})
+        _strict_keys(payload, {"confirmed", "delete_source"})
         if payload.get("confirmed") is not True:
             raise WebError("Confirm you want to delete this saved link.")
+        if type(payload.get("delete_source", False)) is not bool:
+            raise WebError("Choose whether to delete the source video file.")
         with self.guard, self.db() as db:
             link = self._link(db, link_id)
             importing = link["state"] == "importing"
@@ -450,10 +463,34 @@ class WebService:
                     break
             if importing:
                 raise WebError("Wait for this link import to finish before deleting the saved link.", 409)
+            if payload.get("delete_source"):
+                if not link.get("source_id"):
+                    raise WebError("This saved link has no source video to delete.", 409)
+                self.delete_source(link["source_id"], {"confirmed": True})
             # The saved reference is independent of sources, files and artifacts.
             # Source provenance and publication history must remain intact.
             db.conn.execute("DELETE FROM web_links WHERE id=?", (link_id,))
             return {"deleted": link_id}
+
+    def delete_job(self, job_id, payload):
+        _strict_keys(payload, {"confirmed", "delete_source"})
+        if payload.get("confirmed") is not True:
+            raise WebError("Confirm you want to delete this workshop item.")
+        if type(payload.get("delete_source", False)) is not bool:
+            raise WebError("Choose whether to delete the source video file.")
+        with self.guard, self.db() as db:
+            job = self._job(db, job_id)
+            if job["state"] not in {"completed", "failed", "interrupted"}:
+                raise WebError("Wait for this task to finish before deleting it.", 409)
+            if payload.get("delete_source"):
+                source_id = self._job_source_id(db, job)
+                if not source_id:
+                    raise WebError("This workshop item has no source video to delete.", 409)
+                self.delete_source(source_id, {"confirmed": True})
+            # Only remove workshop history. Artifacts and publication records
+            # have independent lifetimes and must survive this deletion.
+            db.conn.execute("DELETE FROM web_jobs WHERE id=?", (job_id,))
+            return {"deleted": job_id}
 
     def _import_link_task(self, db, job):
         from .link_import import LinkError, VIDEO_EXTENSIONS, download_video, twitch_download, twitch_status, describe
@@ -464,6 +501,7 @@ class WebService:
             if link.get("source_id"):
                 source = self._source(db, link["source_id"])
                 if self.source_record(source)["available"]:
+                    job["source_id"] = source["id"]
                     link.update(state="ready", message="This source is already available in your library.")
                     self._save_link(db, link)
                     job["result_message"] = link["message"]
@@ -506,6 +544,7 @@ class WebService:
                                progress=lambda amount: progress("downloading", amount))
             self._stage(db, job, "verifying")
             source = self.register_source(target, name + extension)
+            job["source_id"] = source["id"]
             # Use this worker connection to install the complete association together.
             raw = self._source(db, source["id"])
             raw["source_url"] = link["url"]

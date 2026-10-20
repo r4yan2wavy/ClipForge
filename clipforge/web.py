@@ -245,6 +245,8 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             self._json(self.service.demo(), 201)
         elif path == "/api/jobs":
             self._json(self.service.enqueue_clip(data), 202)
+        elif match := re.fullmatch(rf"/api/jobs/({ENTITY})/delete", path):
+            self._json(self.service.delete_job(match[1], data))
         elif match := re.fullmatch(rf"/api/jobs/({ENTITY})/retry", path):
             if data:
                 raise WebError("Retry does not accept additional options.")

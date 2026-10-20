@@ -131,7 +131,11 @@ The default workspace is the project folder. `config.json` holds settings. `data
 
 Keep those folders when updating the application. Back up the whole workspace if you need its history and original uploaded files. A local-path import continues to depend on the original file outside the workspace. Model files and videos can use substantial disk space. Downloaded MP4 files are saved wherever your browser normally saves downloads.
 
-To reclaim space after rendering, choose **Delete source video** on an app-managed downloaded or browser-uploaded source and confirm. Wait until jobs using it finish. This deletes the source file while preserving finished clips and their metadata. The source is recorded as unavailable; import/upload it again to make more clips. The app never deletes an original external file registered by its local path. Deleting a **Linked videos** card removes only the reference, not its source file.
+To reclaim space after rendering, choose **Delete source video** on an app-managed downloaded or browser-uploaded source and confirm. Wait until jobs using it finish. This permanently deletes ClipForge's source file from this computer while preserving finished clips and captions. The deleted source disappears from the source list; import/upload it again to make more clips. Source provenance remains available to existing clips. Original external files registered by local path and copies saved separately in Downloads are kept.
+
+Finished, failed and interrupted **workshop** items have a **Delete** button. This removes that history entry; the source and finished clips are kept by default. Tick **Also permanently delete the source video from this computer** to free the displayed amount of disk space too. Queued or running tasks must finish first.
+
+Deleting a **Linked videos** card offers the same source-file cleanup option when a managed video is available. This option is selected initially: untick it if you want to keep the imported video. Finished clips and captions are preserved either way. Cleanup is blocked while tasks are active, and a file deletion failure leaves the workshop item or saved link in place so you can try again.
 
 For a separate workspace, use an absolute config path:
 
