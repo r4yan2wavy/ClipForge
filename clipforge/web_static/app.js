@@ -41,6 +41,8 @@ const icon = (name, className = "") => `<svg viewBox="0 0 ${name === "brand" ? "
 const state = {token: "", settings: {}, capabilities: {}, sources: [], jobs: [], clips: [], links: [], sourceId: null, clipId: null, attachLinkId: null, attachPendingUpload: false, socialPlatform: null, socialCreator: null, connected: false, sourceSignature: "", clipSignature: "", jobSignature: "", linkSignature: "", uploading: false, metadataDirty: false};
 let pollTimer;
 let healthBusy = false;
+const storyState = {projects: [], capabilities: {}, project: null, dirty: false, busy: false, loading: false, signature: "", ideasJob: null};
+const storyVoiceState = {voices: [], catalog: [], loaded: false, loading: false, engineReady: false, engineMessage: "", previewJob: null, pendingVoice: null, pendingInstalls: new Set()};
 
 function paintIcons(root = document) {
   $$('[data-icon]', root).forEach((el) => { el.innerHTML = icon(el.dataset.icon); });
@@ -133,12 +135,13 @@ function sampleSource(source) { return Boolean(source?.is_demo || /synthetic.*sa
 function availableSource(source) { return Boolean(source && source.available !== false && !source.source_deleted); }
 
 function navigate() {
-  const page = ["studio", "clips", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "studio";
+  const page = ["studio", "clips", "stories", "settings"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "studio";
   $$(".page").forEach((el) => { el.hidden = el.id !== `page-${page}`; el.classList.toggle("active", !el.hidden); });
   $$("[data-page]").forEach((el) => { el.classList.toggle("active", el.dataset.page === page); if (el.dataset.page === page) el.setAttribute("aria-current", "page"); else el.removeAttribute("aria-current"); });
-  $("#breadcrumb-page").textContent = {studio: "Studio", clips: "Your clips", settings: "Settings"}[page];
-  document.title = `ClipForge · ${{studio: "Studio", clips: "Your clips", settings: "Settings"}[page]}`;
+  $("#breadcrumb-page").textContent = {studio: "Studio", clips: "Your clips", stories: "AI Story Generator", settings: "Settings"}[page];
+  document.title = `ClipForge · ${{studio: "Studio", clips: "Your clips", stories: "AI Story Generator", settings: "Settings"}[page]}`;
   if (page === "clips") renderClips();
+  if (page === "stories" && state.connected) refreshStories();
 }
 
 function emptyState(symbol, title, description, suggestion = "") {
@@ -204,11 +207,39 @@ function jobLabel(job) {
   if (status === "completed") return "Complete";
   if (status === "failed") return "Needs attention";
   if (status === "interrupted") return "Interrupted";
+  if (status === "cancelled") return "Cancelled";
   if (status === "queued") return "In the queue";
+  if (job.cancel_requested) return "Stopping safely";
   const stage = String(job.stage || "Working");
-  const labels = {resolving: "Finding video", downloading: "Downloading video", merging: "Combining audio & video", verifying: "Checking video"};
-  if (job.mode === "link_import" && labels[stage]) return labels[stage];
+  const labels = {preparing: "Preparing video", resolving: "Finding video", downloading: "Downloading video", merging: "Combining audio & video", verifying: "Checking video", transcribing: "Transcribing speech", selecting: "Finding moments", rendering: "Rendering clips", metadata: "Writing clip details"};
+  if (labels[stage]) return labels[stage];
   return stage.charAt(0).toUpperCase() + stage.slice(1).replace(/_/g, " ");
+}
+
+function remainingTime(value) {
+  const seconds = Math.max(1, Math.ceil(value));
+  if (seconds < 60) return `${Math.ceil(seconds / 5) * 5} sec`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)} min`;
+  return `${(Math.ceil(seconds / 360) / 10).toFixed(1)} hr`;
+}
+
+function timingLabel(job) {
+  if (job.state === "queued") return "Time estimate starts when this job begins.";
+  const elapsed = typeof job.elapsed_s === "number" && Number.isFinite(job.elapsed_s) ? `${duration(job.elapsed_s)} elapsed` : "";
+  if (job.state !== "running") return elapsed;
+  if (job.cancel_requested) return [elapsed, "Stopping and cleaning up…"].filter(Boolean).join(" · ");
+  const eta = job.eta_seconds;
+  let estimate = "Estimating time…";
+  if (job.timing_status === "stalled") estimate = "Waiting for progress · estimate paused";
+  else if (job.timing_status === "longer_than_expected") estimate = "Taking longer than previous jobs · updating estimate";
+  if (!["stalled", "longer_than_expected"].includes(job.timing_status) && typeof eta === "number" && Number.isFinite(eta) && eta >= 0) {
+    const low = job.eta_min_seconds;
+    const high = job.eta_max_seconds;
+    const range = typeof low === "number" && typeof high === "number" && Number.isFinite(low) && Number.isFinite(high) && low >= 0 && high >= low && remainingTime(low) !== remainingTime(high);
+    estimate = eta < 1 ? "Finishing this step…" : `~${range ? `${remainingTime(low)}–${remainingTime(high)}` : remainingTime(eta)} left in this step`;
+    if (job.estimate_source === "history") estimate += " · based on previous jobs";
+  }
+  return [elapsed, estimate].filter(Boolean).join(" · ");
 }
 
 function renderJobs() {
@@ -227,17 +258,17 @@ function renderJobs() {
     const status = String(job.state).toLowerCase();
     const running = ["queued", "running"].includes(status);
     const failed = ["failed", "interrupted"].includes(status);
-    const canRetry = failed && ["manual", "ai"].includes(job.mode);
-    let progress = Number(job.progress) || 0;
-    if (progress > 0 && progress <= 1) progress *= 100;
+    const canRetry = (failed || status === "cancelled") && (["manual", "ai"].includes(job.mode) || String(job.kind).startsWith("story"));
     const downloadTotal = Number(job.download_total_bytes) || 0;
     const downloadBytes = Number(job.download_bytes) || 0;
-    const downloadProgress = job.mode === "link_import" && job.stage === "downloading" && downloadTotal > 0;
-    if (downloadProgress) progress = downloadBytes / downloadTotal * 100;
-    progress = Math.min(100, Math.max(2, progress));
-    const progressLabel = job.mode === "link_import" ? `${jobLabel(job)}${downloadProgress ? ` · ${bytes(downloadBytes)} / ${bytes(downloadTotal)}` : ""}` : `${jobLabel(job)} · stage estimate`;
-    const clipId = Array.isArray(job.clip_ids) ? job.clip_ids[0] : null;
-    return `<article class="job-row"><span class="job-icon${running ? " active" : failed ? " failed" : ""}">${icon(running ? "spinner" : failed ? "alert" : "check", running ? "loading-spinner" : "")}</span><div class="job-main"><h3>${esc(job.title || job.source_name || "Studio job")}</h3><p>${esc(job.message || job.source_name || jobLabel(job))}</p></div><div class="job-actions">${running ? `<div class="job-progress"><span>${esc(progressLabel)}</span><div class="progress-track"><span style="width:${progress}%"></span></div></div>` : canRetry ? `<button class="button subtle small" type="button" data-retry="${esc(job.id)}">${icon("refresh")} Retry</button>` : clipId ? `<button class="text-button" type="button" data-review="${esc(clipId)}">Review clip ↗</button>` : failed ? '<a class="text-button" href="#settings">Check settings ↗</a>' : `<span class="job-state">${esc(jobLabel(job))}</span>`}${job.can_delete ? `<button class="text-button danger-text" type="button" data-job-delete="${esc(job.id)}" aria-label="Delete workshop item: ${esc(job.title || job.source_name || "Studio job")}">${icon("trash")} Delete</button>` : ""}</div></article>`;
+    const downloadProgress = job.mode === "link_import" && job.stage === "downloading" && Number.isFinite(downloadTotal) && Number.isFinite(downloadBytes) && downloadTotal > 0 && downloadBytes >= 0 && downloadBytes <= downloadTotal;
+    const stageProgress = typeof job.stage_percent === "number" && Number.isFinite(job.stage_percent) && job.stage_percent >= 0 && job.stage_percent <= 100;
+    const measured = downloadProgress || stageProgress;
+    const progress = downloadProgress ? downloadBytes / downloadTotal * 100 : stageProgress ? job.stage_percent : 0;
+    const progressLabel = `${jobLabel(job)}${downloadProgress ? ` · ${bytes(downloadBytes)} / ${bytes(downloadTotal)}` : measured ? ` · ${Math.floor(progress)}% of this step` : ""}`;
+    const clipId = Array.isArray(job.clip_ids) ? job.clip_ids.find((id) => state.clips.some((clip) => clip.id === id)) : null;
+    const canCancel = running && (job.can_cancel || job.cancel_requested);
+    return `<article class="job-row"><span class="job-icon${running ? " active" : failed ? " failed" : ""}">${icon(running ? "spinner" : failed ? "alert" : status === "cancelled" ? "close" : "check", running ? "loading-spinner" : "")}</span><div class="job-main"><h3>${esc(job.title || job.source_name || "Studio job")}</h3><p>${esc(job.message || job.source_name || jobLabel(job))}</p><p class="job-timing">${esc(timingLabel(job))}</p></div><div class="job-actions">${running ? `<div class="job-progress"><span>${esc(progressLabel)}</span><div class="progress-track${measured ? "" : " indeterminate"}" role="progressbar" aria-label="${esc(jobLabel(job))}" aria-valuemin="0" aria-valuemax="100"${measured ? ` aria-valuenow="${Math.floor(progress)}"` : ' aria-valuetext="Working; progress is not yet known"'}><span${measured ? ` style="width:${progress}%"` : ""}></span></div></div>` : canRetry ? `<button class="button subtle small" type="button" data-retry="${esc(job.id)}">${icon("refresh")} Retry</button>` : clipId ? `<button class="text-button" type="button" data-review="${esc(clipId)}">Review clip ↗</button>` : failed ? '<a class="text-button" href="#settings">Check settings ↗</a>' : `<span class="job-state">${esc(jobLabel(job))}</span>`}${canCancel ? `<button class="text-button" type="button" data-job-cancel="${esc(job.id)}" aria-label="Cancel task: ${esc(job.title || job.source_name || "Studio job")}"${job.cancel_requested ? " disabled" : ""}>${icon("close")} ${job.cancel_requested ? "Stopping…" : "Cancel"}</button>` : ""}${job.can_delete ? `<button class="text-button danger-text" type="button" data-job-delete="${esc(job.id)}" aria-label="Delete workshop item: ${esc(job.title || job.source_name || "Studio job")}">${icon("trash")} Delete</button>` : ""}</div></article>`;
   }).join("");
 }
 
@@ -251,14 +282,18 @@ function renderClips() {
   $("#clip-count").textContent = state.clips.length;
   $("#clips-summary").textContent = `${state.clips.length} ${state.clips.length === 1 ? "clip" : "clips"} in your collection`;
   const filter = $("#clip-filter").value;
-  const clips = state.clips.filter((clip) => filter === "all" || (filter === "review" ? !isApproved(clip) && !clip.submitted : isApproved(clip) || clip.submitted));
+  const query = $("#clip-search").value.trim().toLocaleLowerCase();
+  const sort = $("#clip-sort").value;
+  const clips = state.clips.filter((clip) => (filter === "all" || (filter === "review" ? !isApproved(clip) && !clip.submitted : isApproved(clip) || clip.submitted)) && (!query || String(clip.title || "Untitled clip").toLocaleLowerCase().includes(query)));
+  if (query || filter !== "all") $("#clips-summary").textContent = `${clips.length} of ${state.clips.length} clips shown`;
   if (!clips.length) {
     $("#clip-grid").innerHTML = emptyState("clips", state.clips.length ? "No clips in this view." : "Your best moments belong here.", state.clips.length ? "Try another filter to see the rest of your collection." : "Head to the Studio, add a video, and create your first clip.");
     return;
   }
-  $("#clip-grid").innerHTML = clips.slice().sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))).map((clip) => {
+  const compare = sort === "title" ? (a, b) => String(a.title || "").localeCompare(String(b.title || "")) : sort === "shortest" ? (a, b) => Number(a.duration_s || 0) - Number(b.duration_s || 0) : sort === "oldest" ? (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")) : (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""));
+  $("#clip-grid").innerHTML = clips.slice().sort(compare).map((clip) => {
     const url = mediaUrl(clip.video_url, "clip");
-    return `<article class="clip-card"><button class="clip-thumbnail" type="button" data-review="${esc(clip.id)}" aria-label="Review ${esc(clip.title)}">${url ? `<video src="${esc(url)}#t=0.1" muted preload="metadata" aria-hidden="true" tabindex="-1"></video>` : ""}<span class="clip-play">${icon("play")}</span><span class="clip-duration">${esc(duration(clip.duration_s))}</span></button><div class="clip-card-body"><h3>${esc(clip.title || "Untitled clip")}</h3><div class="clip-card-details"><span>${clip.mode === "ai" ? "Selected by local AI" : "Picked by you"}</span><span>${esc(clip.width || 1080)} × ${esc(clip.height || 1920)}</span></div><div class="clip-card-footer">${clipBadge(clip)}<button class="text-button" type="button" data-review="${esc(clip.id)}">Review & export ↗</button></div></div></article>`;
+    return `<article class="clip-card"><button class="clip-thumbnail" type="button" data-review="${esc(clip.id)}" aria-label="Review ${esc(clip.title)}">${url ? `<video src="${esc(url)}#t=0.1" muted preload="metadata" aria-hidden="true" tabindex="-1"></video>` : ""}<span class="clip-play">${icon("play")}</span><span class="clip-duration">${esc(duration(clip.duration_s))}</span></button><div class="clip-card-body"><h3>${esc(clip.title || "Untitled clip")}</h3><div class="clip-card-details"><span>${clip.mode === "story" ? "AI-generated story" : clip.mode === "ai" ? "Selected by local AI" : "Picked by you"}</span><span>${esc(clip.width || 1080)} × ${esc(clip.height || 1920)}</span></div><div class="clip-card-footer">${clipBadge(clip)}<button class="text-button" type="button" data-review="${esc(clip.id)}">Review & export ↗</button></div><div class="clip-card-actions">${!clip.is_demo ? `<button class="text-button" type="button" data-youtube-review="${esc(clip.id)}">${icon("youtube")} ${clip.publication ? "YouTube status" : isApproved(clip) ? "Upload to YouTube" : "Review for YouTube"}</button>` : ""}<button class="text-button danger-text" type="button" data-clip-delete="${esc(clip.id)}" aria-label="Delete clip: ${esc(clip.title || "Untitled clip")}" title="${esc(clip.delete_message || "Delete this finished clip from your computer")}"${clip.can_delete === false ? " disabled" : ""}>${icon("trash")} Delete clip</button></div></div></article>`;
   }).join("");
 }
 
@@ -276,6 +311,8 @@ function renderHealth() {
   $("#ai-readiness").textContent = aiReady ? "Your local AI tools are ready." : "Local AI setup is incomplete. Check Whisper and Ollama in Settings before starting.";
   $("#link-import-status").textContent = capabilities.link_import?.message || "Link imports download the source video to this computer. Check setup for importer readiness.";
   ["instagram", "tiktok", "twitch"].forEach((platform) => { const info = capabilities[platform]; $("#" + platform + "-setup-status").textContent = info?.message || "Save your settings, then check setup to inspect the credential file."; });
+  $("#youtube-setup-status").textContent = capabilities.youtube?.message || "Save your settings and check setup, then connect through Google.";
+  $("#youtube-authorize").disabled = !capabilities.youtube?.ok;
 }
 
 function fillSettings() {
@@ -286,6 +323,12 @@ function fillSettings() {
     else if (value !== undefined && value !== null) input.value = String(value);
     else input.value = "";
   });
+  updateCaptionPreset();
+}
+
+function updateCaptionPreset() {
+  const size = $("#settings-form").elements["render.font_size"].value;
+  $("#caption-preset").value = ["42", "56", "72"].includes(size) ? size : "custom";
 }
 
 async function refreshHealth(showToast = false) {
@@ -309,6 +352,7 @@ function applyLibrary(data) {
   state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
   state.clips = Array.isArray(data.clips) ? data.clips : [];
   state.links = Array.isArray(data.links) ? data.links : [];
+  if (state.clipId && !currentClip()) clearSelectedClip();
   const sourceSignature = JSON.stringify(state.sources);
   const jobSignature = JSON.stringify(state.jobs);
   const clipSignature = JSON.stringify(state.clips);
@@ -345,6 +389,10 @@ async function refreshLibrary() {
 
 async function poll() {
   await refreshLibrary();
+  if (location.hash === "#stories") {
+    await refreshStories();
+    if (storyVoiceState.loaded || storyVoiceState.previewJob) await refreshStoryVoiceLibrary();
+  }
   pollTimer = setTimeout(poll, activeJobs().length || state.uploading ? 2000 : 8000);
 }
 
@@ -475,12 +523,15 @@ function updateReviewState() {
     const status = typeof publication === "object" && publication ? String(publication.state || publication.status || "submitted").replace(/_/g, " ") : "submitted";
     publicationText = `YouTube: ${status}. ${clip.resume_message || "Submitted clips are locked. Refresh publishing status in Settings for updates."}`;
   } else if (!isApproved(clip)) publicationText = "Watch the clip and approve it before publishing.";
-  else if (state.settings.upload?.enabled) publicationText = `Upload to ${state.settings.upload.target_channel_id || "your configured channel"} with ${state.settings.upload.privacy_status || "private"} visibility. You'll confirm the audience and disclosure first.`;
+  else if (state.settings.upload?.enabled && state.capabilities.youtube?.ok) publicationText = `Upload to ${state.settings.upload.target_channel_id || "your configured channel"} with ${state.settings.upload.privacy_status || "private"} visibility. Upload now or choose when YouTube should publish it.`;
   $("#publication-summary").textContent = publicationText;
-  publish.disabled = youtubeSubmitted || clip.is_demo || !isApproved(clip) || !state.settings.upload?.enabled || state.metadataDirty;
+  publish.disabled = youtubeSubmitted || clip.is_demo || !isApproved(clip) || !state.settings.upload?.enabled || !state.capabilities.youtube?.ok || state.metadataDirty;
   publish.hidden = youtubeSubmitted;
   resume.hidden = !clip.can_resume;
   resume.disabled = !clip.can_resume || !state.settings.upload?.enabled;
+  $("#setup-youtube").hidden = Boolean(clip.publication || (state.settings.upload?.enabled && state.capabilities.youtube?.ok));
+  $("#delete-review-clip").disabled = clip.can_delete === false;
+  $("#delete-review-clip").title = clip.delete_message || "Delete this finished clip from your computer";
   renderSocialPanels(clip);
 }
 
@@ -573,7 +624,9 @@ async function refreshSocial(platform, button) {
 
 function openReview(clipId) {
   const clip = state.clips.find((item) => item.id === clipId);
-  if (!clip) { toast("This clip is not available yet. Wait for the render to finish.", true); return; }
+  if (!clip) { toast("This clip is not available yet. Wait for the render to finish.", true); return false; }
+  if ($("#review-dialog").open && state.clipId === clipId) { updateReviewState(); return true; }
+  if ($("#review-dialog").open && state.metadataDirty) { toast("Save or close your current clip review before opening another clip.", true); return false; }
   state.clipId = clipId;
   state.metadataDirty = false;
   const form = $("#metadata-form");
@@ -597,6 +650,38 @@ function openReview(clipId) {
   clearError("#review-error");
   updateReviewState();
   $("#review-dialog").showModal();
+  return true;
+}
+
+function clearSelectedClip() {
+  ["#publish-dialog", "#social-dialog", "#review-dialog"].forEach((selector) => { if ($(selector).open) $(selector).close(); });
+  const video = $("#clip-video");
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  ["#download-clip", "#download-caption"].forEach((selector) => $(selector).removeAttribute("href"));
+  state.clipId = null;
+  state.metadataDirty = false;
+}
+
+function openDeleteClip(clipId) {
+  const clip = state.clips.find((item) => item.id === clipId);
+  if (!clip || clip.can_delete === false) { toast(clip?.delete_message || "This clip is not available to delete right now.", true); return; }
+  $("#delete-clip-form").elements.clip_id.value = clip.id;
+  $("#delete-clip-name").textContent = clip.title || "Untitled clip";
+  clearError("#delete-clip-error");
+  $("#delete-clip-dialog").showModal();
+}
+
+function openPublish() {
+  const clip = currentClip();
+  if (!clip || clip.publication || clip.is_demo || !isApproved(clip) || state.metadataDirty || !state.settings.upload?.enabled || !state.capabilities.youtube?.ok) return;
+  $("#publish-form").reset();
+  $("#publish-submit").innerHTML = `${icon("youtube")} Upload to YouTube`;
+  $("#publish-destination").textContent = `Upload “${clip.title}” to channel ${state.settings.upload.target_channel_id}. Saved visibility: ${state.settings.upload.privacy_status || "private"}.`;
+  $("#schedule-timezone").textContent = `Time zone: ${Intl.DateTimeFormat().resolvedOptions().timeZone || "your browser's local time"}. YouTube publishes a scheduled upload automatically after it has finished processing. Leave at least 60 minutes before publishing; your workspace may require more.`;
+  clearError("#publish-error");
+  $("#publish-dialog").showModal();
 }
 
 function configureSourceCleanup(kind, sourceId, checked) {
@@ -751,8 +836,17 @@ function bindEvents() {
     const retry = event.target.closest("[data-retry]");
     const review = event.target.closest("[data-review]");
     const remove = event.target.closest("[data-job-delete]");
+    const cancel = event.target.closest("[data-job-cancel]");
     if (retry) retryJob(retry.dataset.retry, retry);
     if (review) openReview(review.dataset.review);
+    if (cancel) {
+      const job = state.jobs.find((item) => item.id === cancel.dataset.jobCancel);
+      if (!job?.can_cancel || job.cancel_requested) return;
+      $("#cancel-job-form").elements.job_id.value = job.id;
+      $("#cancel-job-name").textContent = job.title || job.source_name || "Studio job";
+      clearError("#cancel-job-error");
+      $("#cancel-job-dialog").showModal();
+    }
     if (remove) {
       const job = state.jobs.find((item) => item.id === remove.dataset.jobDelete);
       if (!job?.can_delete) return;
@@ -762,6 +856,21 @@ function bindEvents() {
       clearError("#delete-job-error");
       $("#delete-job-dialog").showModal();
     }
+  });
+  $("#cancel-job-keep").addEventListener("click", () => $("#cancel-job-dialog").close());
+  $("#cancel-job-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const jobId = event.currentTarget.elements.job_id.value;
+    const restore = startAction($("#cancel-job-submit"), "Stopping…");
+    clearError("#cancel-job-error");
+    try {
+      await api(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {confirmed: true});
+      $("#cancel-job-dialog").close();
+      await refreshLibrary();
+      scheduleFastPoll();
+      toast("Cancellation requested. ClipForge will stop this task and clean up temporary files.");
+    } catch (error) { showError("#cancel-job-error", error); }
+    finally { restore(); }
   });
   $("#delete-job-cancel").addEventListener("click", () => $("#delete-job-dialog").close());
   $("#delete-job-form").addEventListener("submit", async (event) => {
@@ -778,8 +887,36 @@ function bindEvents() {
     } catch (error) { showError("#delete-job-error", error); }
     finally { restore(); }
   });
-  $("#clip-grid").addEventListener("click", (event) => { const button = event.target.closest("[data-review]"); if (button) openReview(button.dataset.review); });
+  $("#clip-grid").addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-clip-delete]");
+    const youtube = event.target.closest("[data-youtube-review]");
+    const review = event.target.closest("[data-review]");
+    if (remove) openDeleteClip(remove.dataset.clipDelete);
+    else if (youtube) { if (openReview(youtube.dataset.youtubeReview)) openPublish(); }
+    else if (review) openReview(review.dataset.review);
+  });
   $("#clip-filter").addEventListener("change", renderClips);
+  $("#clip-search").addEventListener("input", renderClips);
+  $("#clip-sort").addEventListener("change", renderClips);
+  $("#delete-review-clip").addEventListener("click", () => { if (state.clipId) openDeleteClip(state.clipId); });
+  $("#delete-clip-cancel").addEventListener("click", () => $("#delete-clip-dialog").close());
+  $("#delete-clip-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const clipId = event.currentTarget.elements.clip_id.value;
+    clearError("#delete-clip-error");
+    const restore = startAction($("#delete-clip-submit"), "Deleting clip…");
+    // Release the open preview before Windows removes the underlying media.
+    const selected = state.clipId === clipId;
+    if (selected) { $("#clip-video").pause(); $("#clip-video").removeAttribute("src"); $("#clip-video").load(); }
+    try {
+      const result = await api(`/api/clips/${encodeURIComponent(clipId)}/delete`, {confirmed: true});
+      $("#delete-clip-dialog").close();
+      if (state.clipId === clipId) clearSelectedClip();
+      await refreshLibrary();
+      toast(`Clip deleted from this computer${result.bytes_freed > 0 ? ` · ${bytes(result.bytes_freed)} freed` : ""}.`);
+    } catch (error) { showError("#delete-clip-error", error); if (selected && currentClip()) $("#clip-video").src = mediaUrl(currentClip().video_url, "clip"); }
+    finally { restore(); }
+  });
   $("#import-path").addEventListener("click", () => { clearError("#path-error"); $("#path-dialog").showModal(); });
   $("#path-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -885,6 +1022,10 @@ function bindEvents() {
     finally { restore(); updateReviewState(); }
   });
   $("#check-health").addEventListener("click", () => refreshHealth(true));
+  $("#caption-preset").addEventListener("change", (event) => {
+    if (event.target.value !== "custom") $("#settings-form").elements["render.font_size"].value = event.target.value;
+  });
+  $("#settings-form").elements["render.font_size"].addEventListener("input", updateCaptionPreset);
   $("#settings-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = {};
@@ -896,6 +1037,12 @@ function bindEvents() {
     finally { restore(); renderJobs(); }
   });
   $("#youtube-authorize").addEventListener("click", (event) => youtubeAction("authorize", event.currentTarget));
+  $("#setup-youtube").addEventListener("click", () => {
+    if ($("#review-dialog").open) $("#review-dialog").close();
+    location.hash = "settings";
+    $("#youtube-settings").open = true;
+    $("#youtube-settings").scrollIntoView({behavior: "smooth", block: "start"});
+  });
   $("#youtube-poll").addEventListener("click", (event) => youtubeAction("poll", event.currentTarget));
   $("#youtube-revoke").addEventListener("click", (event) => {
     if (window.confirm("Disconnect YouTube and remove stored authorization and owned-channel API data? Your local videos will remain.")) youtubeAction("revoke", event.currentTarget);
@@ -910,14 +1057,9 @@ function bindEvents() {
     catch (error) { showError("#review-error", error); }
     finally { restore(); updateReviewState(); }
   });
-  $("#open-publish").addEventListener("click", () => {
-    const clip = currentClip();
-    if (!clip || clip.publication || clip.is_demo || !isApproved(clip)) return;
-    $("#publish-form").reset();
-    $("#publish-destination").textContent = `Upload “${clip.title}” to channel ${state.settings.upload?.target_channel_id || "(not configured)"}. Saved visibility: ${state.settings.upload?.privacy_status || "private"}.`;
-    $("#schedule-timezone").textContent = `Time zone: ${Intl.DateTimeFormat().resolvedOptions().timeZone || "your browser's local time"}. Scheduled uploads start private and become public at the selected time. Leave at least 60 minutes before publishing; your workspace may require more.`;
-    clearError("#publish-error");
-    $("#publish-dialog").showModal();
+  $("#open-publish").addEventListener("click", openPublish);
+  $("#publish-form").elements.schedule.addEventListener("change", (event) => {
+    $("#publish-submit").innerHTML = `${icon("youtube")} ${event.target.value ? "Upload & schedule" : "Upload to YouTube"}`;
   });
   $("#publish-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -951,9 +1093,446 @@ function bindEvents() {
   });
 }
 
+
+const STORY_GENRES = {mystery: "Mystery", horror: "Horror", suspense: "Suspense", science_fiction: "Science fiction", random: "Random"};
+const STORY_STAGES = {story_writing: "Writing your story", story_planning: "Planning scenes", story_narrating: "Recording narration", story_audio: "Mixing music and sound", story_rendering: "Animating your story", story_exporting: "Finishing the video", writing: "Writing your story", narrating: "Recording narration", rendering: "Animating your story"};
+
+function storyFields() { return $("#story-form").elements; }
+function storyJob(projectId = storyState.project?.id) {
+  return activeJobs().find((job) => ["story", "story_rewrite", "story_scene"].includes(job.kind) && (job.project_id || job.payload?.project_id) === projectId);
+}
+function storyDirty() {
+  storyState.dirty = true;
+  $("#story-save-state").textContent = "You have unsaved changes. Generate will save them first.";
+}
+function storyOptions() {
+  const fields = storyFields();
+  return {idea: fields.idea.value.trim(), genre: fields.genre.value, duration: Number(fields.duration.value), voice: fields.voice.value, captions: fields.captions.value === "true", music: fields.music.value === "true", quality: Number(fields.quality.value), rate: Number(fields.rate.value)};
+}
+function storySceneOptions() {
+  return $$("[data-story-scene]", $("#story-scenes")).map((scene) => {
+    const data = {};
+    $$("[data-scene-field]", scene).forEach((field) => { data[field.dataset.sceneField] = field.value; });
+    const original = storyState.project?.scenes?.find((item) => String(item.id) === scene.dataset.storyScene);
+    return {id: scene.dataset.storyScene, narration: data.narration || "", setting: data.setting, backdrop: data.backdrop || original?.backdrop || "night", action: data.action, prop: data.prop || original?.prop || "none", beats: storySceneBeats(scene, original), camera: data.camera, lighting: data.lighting, effect: data.effect, character_ids: original?.character_ids || []};
+  });
+}
+function renderStoryVoices() {
+  const select = $("#story-voice");
+  const previous = select.value || storyState.project?.options?.voice || "";
+  const voices = Array.isArray(storyState.capabilities.voices) ? storyState.capabilities.voices : [];
+  const markup = voices.length ? voices.map((voice) => `<option value="${esc(voice.id)}">${esc(voice.name)}${voice.provider ? ` · ${esc(voice.provider)}` : ""}${voice.language ? ` · ${esc(voice.language)}` : ""}</option>`).join("") : '<option value="">No local voice detected</option>';
+  if (select.innerHTML !== markup) select.innerHTML = markup;
+  if (voices.some((voice) => voice.id === previous)) select.value = previous;
+  else if (previous && storyState.project) {
+    const missing = document.createElement("option");
+    missing.value = previous;
+    missing.textContent = "Saved voice is unavailable · choose another";
+    select.append(missing);
+    select.value = previous;
+  }
+}
+function renderStoryCapabilities() {
+  const cap = storyState.capabilities;
+  $("#story-setup").classList.toggle("ready", Boolean(cap.ok));
+  $("#story-setup-title").textContent = cap.ok ? "Your local story studio is ready" : "A little setup before your first story";
+  $("#story-setup-detail").textContent = cap.message || "Check your installed voices, local Ollama model and video tools.";
+  renderStoryVoices();
+  renderStoryControls();
+}
+function renderStoryControls() {
+  const active = storyJob();
+  const locked = storyState.busy || Boolean(active);
+  const cap = storyState.capabilities;
+  const renderable = cap.ok || (cap.renderer_ready && cap.voices?.length && storyState.project?.scenes?.length);
+  $("#story-generate").disabled = locked || !renderable || !state.connected;
+  $("#story-save").disabled = locked || !state.connected;
+  $("#story-save-scenes").disabled = locked || !state.connected;
+  $("#story-rewrite").disabled = locked || !storyState.project || !storyState.capabilities.ollama_ready;
+  $("#story-ideas").disabled = storyState.busy || !storyState.capabilities.ollama_ready || Boolean(storyState.ideasJob && activeJobs().some((job) => job.id === storyState.ideasJob));
+  $("#story-random").disabled = locked;
+  $$("[data-scene-regenerate]", $("#story-scenes")).forEach((button) => { button.disabled = locked || !storyState.capabilities.ollama_ready; });
+  $$("textarea, select", $("#story-form")).forEach((field) => { field.disabled = locked; });
+  $$("textarea, select, input", $("#story-scenes")).forEach((field) => { field.disabled = locked; });
+  $$("[data-beat-add], [data-beat-remove]", $("#story-scenes")).forEach((button) => { button.disabled = locked; });
+  $("#story-cancel").hidden = !active?.can_cancel;
+  $("#story-cancel").disabled = Boolean(active?.cancel_requested);
+  $("#story-cancel").textContent = active?.cancel_requested ? "Stopping…" : "Cancel generation";
+  renderStoryVoiceControls();
+}
+function renderStoryOutput() {
+  const project = storyState.project;
+  const job = storyJob();
+  const url = project?.export_available === false ? "" : mediaUrl(project?.video_url || (project?.clip_id ? `/media/clip/${project.clip_id}` : ""), "clip");
+  const video = $("#story-video");
+  if (url) {
+    const previewUrl = `${url}#t=0.35`;
+    if (video.getAttribute("src") !== previewUrl) video.src = previewUrl;
+  } else if (video.getAttribute("src")) {
+    video.pause(); video.removeAttribute("src"); video.load();
+  }
+  video.hidden = !url;
+  $("#story-preview-art").hidden = Boolean(url);
+  $("#story-download").hidden = !url;
+  $("#story-download").href = url ? `${url}${url.includes("?") ? "&" : "?"}download=1` : "";
+  $("#story-review").hidden = !url || !project?.clip_id;
+  $("#story-output-title").textContent = project?.title || "Dark Stickman Stories";
+  $("#story-output-detail").textContent = project?.duration_s ? `${duration(project.duration_s)} · Vertical ${project.options?.quality || 720}p · Dark Stickman Stories` : "Original stories. Consistent characters. A little mystery.";
+  const warnings = Array.isArray(project?.warnings) ? project.warnings : [];
+  $("#story-warnings").hidden = !warnings.length;
+  $("#story-warnings").textContent = warnings.join(" ");
+  const progress = $("#story-progress");
+  progress.hidden = !job && !project?.error;
+  if (job) {
+    const percent = job.stage_percent;
+    const measured = typeof percent === "number" && Number.isFinite(percent) && percent >= 0 && percent <= 100;
+    progress.innerHTML = `<strong>${esc(job.cancel_requested ? "Stopping and saving your project…" : job.state === "queued" ? "Waiting in the local queue" : STORY_STAGES[job.stage] || job.message || "Creating your story…")}</strong><p>${esc(timingLabel(job))}</p><div class="progress-track${measured ? "" : " indeterminate"}" role="progressbar" aria-label="Story generation progress"${measured ? ` aria-valuenow="${Math.floor(percent)}" aria-valuemin="0" aria-valuemax="100"` : ' aria-valuetext="Working; time estimate is not yet available"'}><span${measured ? ` style="width:${percent}%"` : ""}></span></div>`;
+  } else progress.textContent = project?.error || "";
+  renderStoryControls();
+}
+function storySelectOptions(values, selected) {
+  return values.map((value) => `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(value.replace(/_/g, " "))}</option>`).join("");
+}
+const STORY_ACTIONS = ["walk", "run", "turn", "look", "point", "reach", "open", "close", "pick_up", "hold", "react", "hide", "crouch", "enter", "exit", "idle"];
+const STORY_TARGETS = ["none", "left", "center", "right", "window", "door", "prop", "partner"];
+const STORY_EXPRESSIONS = ["neutral", "curious", "worried", "surprised", "determined"];
+function storySceneBeats(scene, original) {
+  const rows = $$("[data-story-beat]", scene);
+  if (!rows.length) return scene.dataset.motionEdited === "true" ? [] : (original?.beats || []);
+  return rows.map((row) => {
+    const fields = {};
+    $$("[data-beat-field]", row).forEach((field) => { fields[field.dataset.beatField] = field.value; });
+    return {at: Number(fields.at) / 100, character_id: fields.character_id, action: fields.action, target: fields.target, expression: fields.expression};
+  });
+}
+function storyBeatMarkup(scene, beat = {}) {
+  const characters = (storyState.project?.characters || []).filter((character) => scene.character_ids?.includes(character.id));
+  return `<div class="story-motion-beat" data-story-beat><label>At %<input data-beat-field="at" type="number" min="0" max="100" step="1" value="${esc(Math.round((Number(beat.at) || 0) * 100))}" required></label><label>Character<select data-beat-field="character_id">${characters.map((character) => `<option value="${esc(character.id)}"${character.id === (beat.character_id || scene.character_ids?.[0]) ? " selected" : ""}>${esc(character.name || character.id)}</option>`).join("")}</select></label><label>Action<select data-beat-field="action">${storySelectOptions(STORY_ACTIONS, beat.action || "look")}</select></label><label>Target<select data-beat-field="target">${storySelectOptions(STORY_TARGETS, beat.target || "none")}</select></label><label>Expression<select data-beat-field="expression">${storySelectOptions(STORY_EXPRESSIONS, beat.expression || "neutral")}</select></label><button class="icon-button" type="button" data-beat-remove aria-label="Remove motion beat">${icon("trash")}</button></div>`;
+}
+function renderStoryEditor() {
+  const project = storyState.project;
+  const scenes = Array.isArray(project?.scenes) ? project.scenes : [];
+  $("#story-editor").hidden = !scenes.length;
+  $("#story-characters").innerHTML = (project?.characters || []).map((character) => `<span class="badge">${icon("cpu")} ${esc(character.name || character.id)}${character.accessory && character.accessory !== "none" ? ` · ${esc(character.accessory)}` : ""}</span>`).join("");
+  $("#story-scenes").innerHTML = scenes.map((scene, i) => `<article class="story-scene" data-story-scene="${esc(scene.id)}"><div class="story-scene-heading"><h3><span>${String(i + 1).padStart(2, "0")}</span> Scene ${i + 1}</h3><button class="text-button" type="button" data-scene-regenerate="${esc(scene.id)}">${icon("refresh")} Regenerate scene</button></div><label>Narration<textarea data-scene-field="narration" maxlength="1200" rows="3" required>${esc(scene.narration)}</textarea></label><div class="story-scene-options"><label>Setting<select data-scene-field="setting">${storySelectOptions(["bedroom", "hallway", "street", "school", "forest", "rooftop"], scene.setting)}</select></label><label>View / backdrop<select data-scene-field="backdrop">${storySelectOptions(["night", "forest", "city", "desert", "otherworld"], scene.backdrop || "night")}</select></label><label>Main action<select data-scene-field="action">${storySelectOptions(STORY_ACTIONS, scene.action)}</select></label><label>Scene object<select data-scene-field="prop">${storySelectOptions(["none", "phone", "key", "book", "flashlight"], scene.prop || "none")}</select></label><label>Camera<select data-scene-field="camera">${storySelectOptions(["pan", "zoom", "static"], scene.camera)}</select></label><label>Lighting<select data-scene-field="lighting">${storySelectOptions(["normal", "nightvision", "flicker"], scene.lighting)}</select></label><label>Effect<select data-scene-field="effect">${storySelectOptions(["none", "shake", "security"], scene.effect)}</select></label></div><details class="story-motion-editor"><summary>Character motion &amp; expressions</summary><p class="field-hint">Characters move smoothly between these moments. With no custom beats, ClipForge plans motion from the scene. Changing Main action resets custom beats for this scene.</p><div data-story-beats>${(scene.beats || []).map((beat) => storyBeatMarkup(scene, beat)).join("")}</div><button class="text-button" type="button" data-beat-add="${esc(scene.id)}">${icon("plus")} Add motion beat</button><span class="field-hint">Up to 8 moments · 0% is the scene start, 100% is its end.</span></details></article>`).join("");
+}
+function fillStoryProject(project) {
+  storyState.project = project;
+  const options = project?.options || {};
+  const fields = storyFields();
+  fields.idea.value = options.idea || "";
+  fields.genre.value = options.genre || "mystery";
+  fields.duration.value = String(options.duration || 60);
+  fields.quality.value = String(options.quality || 720);
+  fields.captions.value = String(options.captions !== false);
+  fields.music.value = String(options.music !== false);
+  fields.rate.value = String(options.rate || 0);
+  fields.batch_count.value = "1";
+  renderStoryVoices();
+  if (options.voice) fields.voice.value = options.voice;
+  storyState.dirty = false;
+  $("#story-save-state").textContent = project ? "Saved locally. Your finished exports are kept as you edit." : "Your project and finished video stay on this computer.";
+  clearError("#story-error");
+  renderStoryEditor(); renderStoryOutput();
+}
+function renderStoryHistory() {
+  $("#story-count").textContent = storyState.projects.length;
+  $("#story-history").innerHTML = storyState.projects.length ? storyState.projects.map((project) => `<article class="story-history-card${project.id === storyState.project?.id ? " selected" : ""}"><span class="story-history-icon">${icon("film")}</span><div><h3>${esc(project.title || "Untitled story")}</h3><p>${esc(STORY_GENRES[project.options?.genre || project.genre] || "Dark Stickman Stories")} · ${esc(project.state || "draft")}${project.duration_s ? ` · ${esc(duration(project.duration_s))}` : ""}</p></div><button class="button subtle small" type="button" data-story-open="${esc(project.id)}">Open project ↗</button></article>`).join("") : emptyState("sparkles", "Your first story starts above.", "Save an idea or generate a video to begin your local project history.");
+}
+function renderStoryIdeas() {
+  if (!storyState.ideasJob) return;
+  const job = state.jobs.find((item) => item.id === storyState.ideasJob);
+  if (!job) return;
+  const target = $("#story-idea-results");
+  target.hidden = false;
+  const result = job.result?.ideas || job.result;
+  if (job.state === "completed" && Array.isArray(result)) {
+    target.innerHTML = `<strong>Pick an idea to make it yours</strong>${result.slice(0, 5).map((idea, i) => `<button type="button" class="story-idea-option" data-story-idea="${i}">${esc(typeof idea === "string" ? idea : idea.idea || idea.title || "")}</button>`).join("")}`;
+  } else target.textContent = ["failed", "cancelled", "interrupted"].includes(job.state) ? (job.message || "Idea generation stopped. You can try again.") : "Your local AI is thinking of five new ideas…";
+}
+function storyVoiceJob(kind, id) {
+  return activeJobs().find((job) => job.kind === kind && (kind === "story_voice_install" ? job.voice_catalog_id === id : job.voice_id === id));
+}
+function renderStoryVoiceControls() {
+  const voice = storyFields().voice.value;
+  const installed = storyState.capabilities.voices || [];
+  $("#story-preview-voice").disabled = !state.connected || !voice || !installed.some((item) => item.id === voice) || Boolean(storyVoiceState.pendingVoice) || Boolean(storyVoiceJob("story_voice_preview", voice));
+  $$("[data-voice-use]").forEach((button) => { button.disabled = storyState.busy || Boolean(storyJob()); });
+}
+function renderStoryVoicePreview() {
+  const job = state.jobs.find((item) => item.id === storyVoiceState.previewJob);
+  const panel = $("#story-voice-preview");
+  const audio = $("#story-voice-audio");
+  panel.hidden = !job && !storyVoiceState.pendingVoice;
+  const cancel = $("#story-voice-preview-cancel");
+  cancel.hidden = !job?.can_cancel || !["queued", "running"].includes(job.state);
+  cancel.disabled = Boolean(job?.cancel_requested);
+  if (storyVoiceState.pendingVoice) $("#story-voice-preview-status").textContent = "Starting a short local voice preview…";
+  if (!job) { renderStoryVoiceControls(); return; }
+  const source = mediaUrl(job.voice_preview_url || job.result?.voice_preview_url, "story-voice");
+  if (job.state === "completed" && source) {
+    if (audio.getAttribute("src") !== source) {
+      audio.src = source;
+      if (typeof audio.play === "function") { const playing = audio.play(); if (playing?.catch) playing.catch(() => {}); }
+    }
+    audio.hidden = false;
+    $("#story-voice-preview-status").textContent = "Preview ready. This voice runs locally on your computer.";
+  } else {
+    audio.hidden = true;
+    $("#story-voice-preview-status").textContent = ["failed", "cancelled", "interrupted"].includes(job.state) ? (job.message || "Voice preview stopped. Try another voice or retry.") : `${job.cancel_requested ? "Stopping preview…" : job.state === "queued" ? "Voice preview is waiting in the local queue…" : "Recording a short voice preview…"}${timingLabel(job) ? ` ${timingLabel(job)}` : ""}`;
+  }
+  renderStoryVoiceControls();
+}
+function renderStoryVoiceLibrary() {
+  $("#story-voice-engine").textContent = storyVoiceState.engineMessage || "Installed voices are ready to preview.";
+  const providers = {sapi:"Windows speech", piper:"Piper · local neural", espeak:"eSpeak · local speech"};
+  $("#story-installed-voices").innerHTML = storyVoiceState.voices.length ? storyVoiceState.voices.map((voice) => `<article class="story-voice-card"><div class="story-voice-card-heading"><h4>${esc(voice.name || voice.id)}</h4><span class="badge green">Installed</span></div><p>${esc(voice.language || "Local voice")} · ${esc(providers[voice.provider] || voice.provider || "Local speech")}</p><div class="story-voice-card-actions"><button class="button subtle small" type="button" data-voice-preview="${esc(voice.id)}"${storyVoiceState.pendingVoice || storyVoiceJob("story_voice_preview", voice.id) ? " disabled" : ""}>${icon("play")} Preview</button><button class="text-button" type="button" data-voice-use="${esc(voice.id)}">Use narrator ↗</button></div></article>`).join("") : emptyState("cpu", "No installed narrator yet.", "Add a local voice below or install a Windows speech voice.");
+  $("#story-voice-catalog").innerHTML = storyVoiceState.catalog.length ? storyVoiceState.catalog.map((voice) => {
+    const job = storyVoiceJob("story_voice_install", voice.id);
+    const pending = Boolean(job || storyVoiceState.pendingInstalls.has(voice.id));
+    const license = externalUrl(voice.license_url);
+    const source = externalUrl(voice.source_url);
+    const dataset = externalUrl(voice.dataset_url);
+    const card = externalUrl(voice.model_card_url);
+    const failure = !voice.installed && !job ? state.jobs.find((item) => item.kind === "story_voice_install" && item.voice_catalog_id === voice.id && ["failed", "interrupted", "cancelled"].includes(item.state)) : null;
+    const progress = job?.stage_percent;
+    const measured = typeof progress === "number" && Number.isFinite(progress) && progress >= 0 && progress <= 100;
+    return `<article class="story-voice-card"><div class="story-voice-card-heading"><h4>${esc(voice.name || voice.id)}</h4><span class="badge${voice.installed ? " green" : ""}">${voice.installed ? "Installed" : "Available"}</span></div><p>${esc(voice.language || "Voice")} · ${esc(providers[voice.provider] || voice.provider || "Piper")}${voice.download_bytes ? ` · ~${esc(bytes(voice.download_bytes))} download` : ""}</p><p class="story-voice-license">License: ${license ? `<a href="${esc(license)}" target="_blank" rel="noopener noreferrer">${esc(voice.license || "View license")} ↗</a>` : esc(voice.license || "See source terms")}${source ? ` · <a href="${esc(source)}" target="_blank" rel="noopener noreferrer">Source ↗</a>` : ""}${dataset ? ` · <a href="${esc(dataset)}" target="_blank" rel="noopener noreferrer">Dataset terms ↗</a>` : ""}${card ? ` · <a href="${esc(card)}" target="_blank" rel="noopener noreferrer">Model card ↗</a>` : ""}</p>${voice.attribution ? `<p class="story-voice-attribution">${esc(voice.attribution)}</p>` : ""}${failure ? `<p class="story-voice-failure" role="status">${esc(failure.message || "The voice download stopped. You can download it again.")}</p>` : ""}${job ? `<div class="story-voice-job"><span>${esc(job.cancel_requested ? "Stopping download…" : job.message || "Downloading voice onto this computer…")}</span><p>${esc(timingLabel(job))}</p><div class="progress-track${measured ? "" : " indeterminate"}" role="progressbar" aria-label="Voice download progress"${measured ? ` aria-valuenow="${Math.floor(progress)}" aria-valuemin="0" aria-valuemax="100"` : ' aria-valuetext="Downloading; progress not yet known"'}><span${measured ? ` style="width:${progress}%"` : ""}></span></div></div>` : ""}<div class="story-voice-card-actions">${voice.installed && voice.voice_id ? `<button class="button subtle small" type="button" data-voice-preview="${esc(voice.voice_id)}"${storyVoiceState.pendingVoice ? " disabled" : ""}>${icon("play")} Preview</button><button class="text-button" type="button" data-voice-use="${esc(voice.voice_id)}">Use narrator ↗</button>` : `<button class="button subtle small" type="button" data-voice-install="${esc(voice.id)}"${pending || !storyVoiceState.engineReady ? " disabled" : ""}>${icon(pending ? "spinner" : "download", pending ? "loading-spinner" : "")} ${pending ? "Installing…" : "Download voice"}</button>`}${job?.can_cancel ? `<button class="text-button" type="button" data-voice-job-cancel="${esc(job.id)}"${job.cancel_requested ? " disabled" : ""}>Cancel download</button>` : ""}</div></article>`;
+  }).join("") : emptyState("folder", "No catalog voices available.", "Refresh the local voice library or check the setup guide.");
+  renderStoryVoicePreview();
+}
+async function refreshStoryVoiceLibrary(force = false) {
+  if (storyVoiceState.loading) return;
+  storyVoiceState.loading = true;
+  try {
+    const data = await api(force ? "/api/story-voices?refresh=1" : "/api/story-voices");
+    storyVoiceState.voices = Array.isArray(data.voices) ? data.voices : [];
+    storyVoiceState.catalog = Array.isArray(data.catalog) ? data.catalog : [];
+    storyVoiceState.engineReady = Boolean(data.engine_ready);
+    storyVoiceState.engineMessage = data.engine_message || "";
+    storyVoiceState.loaded = true;
+    storyState.capabilities.voices = storyVoiceState.voices;
+    renderStoryVoices(); renderStoryVoiceLibrary();
+    clearError("#story-voice-error");
+  } catch (error) { showError("#story-voice-error", error); }
+  finally { storyVoiceState.loading = false; }
+}
+function requestStoryVoiceCancel(jobId) {
+  const job = state.jobs.find((item) => item.id === jobId);
+  if (!job?.can_cancel || job.cancel_requested) return;
+  $("#cancel-job-form").elements.job_id.value = job.id;
+  $("#cancel-job-name").textContent = job.title || "Local voice task";
+  clearError("#cancel-job-error"); $("#cancel-job-dialog").showModal();
+}
+async function previewStoryVoice(voice) {
+  if (!voice || storyVoiceState.pendingVoice) return;
+  storyVoiceState.pendingVoice = voice;
+  const audio = $("#story-voice-audio");
+  if (typeof audio.pause === "function") audio.pause();
+  audio.hidden = true;
+  clearError("#story-voice-error"); renderStoryVoicePreview();
+  const panel = $("#story-voice-preview");
+  if (typeof panel.scrollIntoView === "function") panel.scrollIntoView({behavior:"smooth", block:"center"});
+  try {
+    const result = await api("/api/story-voices/preview", {voice});
+    storyVoiceState.previewJob = (result.job || result).id;
+    await refreshLibrary(); scheduleFastPoll();
+  } catch (error) { showError("#story-voice-error", error); $("#story-voice-library").open = true; }
+  finally { storyVoiceState.pendingVoice = null; renderStoryVoicePreview(); if (storyVoiceState.loaded) renderStoryVoiceLibrary(); }
+}
+async function installStoryVoice(id) {
+  if (storyVoiceState.pendingInstalls.has(id) || storyVoiceJob("story_voice_install", id)) return;
+  storyVoiceState.pendingInstalls.add(id); renderStoryVoiceLibrary();
+  clearError("#story-voice-error");
+  try {
+    await api("/api/story-voices/install", {id});
+    await refreshLibrary(); scheduleFastPoll();
+    toast("Voice download queued. You can follow it here or in the workshop.");
+  } catch (error) { showError("#story-voice-error", error); }
+  finally { storyVoiceState.pendingInstalls.delete(id); renderStoryVoiceLibrary(); }
+}
+
+async function refreshStories() {
+  if (storyState.loading) return;
+  storyState.loading = true;
+  try {
+    const data = await api("/api/stories");
+    storyState.projects = Array.isArray(data.projects) ? data.projects : [];
+    storyState.capabilities = data.capabilities || {};
+    renderStoryCapabilities(); renderStoryHistory(); renderStoryIdeas();
+    const currentId = storyState.project?.id;
+    const latest = storyState.projects.find((project) => project.id === currentId);
+    if (latest && !storyState.dirty && !storyState.busy && (latest.updated_at !== storyState.project.updated_at || latest.state !== storyState.project.state)) {
+      const detail = await api(`/api/stories/${encodeURIComponent(currentId)}`);
+      if (storyState.project?.id === currentId && !storyState.dirty && !storyState.busy) fillStoryProject(detail.project || detail);
+    }
+    renderStoryOutput();
+  } catch (error) {
+    $("#story-setup-title").textContent = "Could not check the story studio";
+    $("#story-setup-detail").textContent = error.message;
+  } finally { storyState.loading = false; }
+}
+async function openStory(id) {
+  if (storyState.dirty && !window.confirm("Open another project and discard unsaved changes?")) return;
+  if (storyState.busy) return;
+  storyState.busy = true; renderStoryControls();
+  try {
+    const data = await api(`/api/stories/${encodeURIComponent(id)}`);
+    fillStoryProject(data.project || data);
+    renderStoryHistory();
+    $("#stories-title").scrollIntoView?.({behavior: "smooth", block: "start"});
+  } catch (error) { showError("#story-error", error); }
+  finally { storyState.busy = false; renderStoryControls(); }
+}
+async function saveStory() {
+  const options = storyOptions();
+  if (!options.idea) throw new Error("Describe the story you want to make first.");
+  const current = storyState.project;
+  const payload = current ? {...options, scenes: storySceneOptions()} : options;
+  const data = await api(current ? `/api/stories/${encodeURIComponent(current.id)}/save` : "/api/stories", payload);
+  fillStoryProject(data.project || data);
+  return storyState.project;
+}
+async function storyAction(action, button, sceneId = null) {
+  if (storyState.busy || storyJob()) return;
+  clearError("#story-error");
+  if (action !== "save" && !$("#story-form").reportValidity()) return;
+  const batchCount = action === "generate" ? Number(storyFields().batch_count.value || 1) : 1;
+  const batchOptions = storyOptions();
+  if (batchCount > 1 && !storyState.capabilities.ollama_ready) {
+    showError("#story-error", "Start your local Ollama model before generating a batch of new stories.");
+    return;
+  }
+  storyState.busy = true;
+  const restore = startAction(button, action === "generate" ? "Starting your story…" : "Saving…");
+  renderStoryControls();
+  try {
+    const project = await saveStory();
+    if (action !== "save") {
+      if (batchCount > 1) {
+        const batch = await api("/api/stories/batch", {options: batchOptions, count: batchCount});
+        if (batch.projects?.[0]) fillStoryProject(batch.projects[0]);
+        toast(`${batchCount} original stories are queued. Each has its own project in Local project history.`);
+      } else {
+        const suffix = sceneId ? `scenes/${encodeURIComponent(sceneId)}/regenerate` : action;
+        await api(`/api/stories/${encodeURIComponent(project.id)}/${suffix}`, {});
+        toast(action === "generate" ? "Your story is in the local queue. You can follow it here." : sceneId ? "Rewriting this scene with your local AI." : "Rewriting your script with your local AI.");
+      }
+      await refreshLibrary(); scheduleFastPoll();
+    } else toast("Story project saved on this computer.");
+    await refreshStories();
+  } catch (error) { showError("#story-error", error); }
+  finally { restore(); storyState.busy = false; renderStoryControls(); renderStoryOutput(); }
+}
+function bindStoryEvents() {
+  const form = $("#story-form");
+  form.addEventListener("input", storyDirty);
+  form.addEventListener("change", storyDirty);
+  form.addEventListener("submit", (event) => { event.preventDefault(); storyAction("generate", $("#story-generate")); });
+  $("#story-save").addEventListener("click", () => storyAction("save", $("#story-save")));
+  $("#story-save-scenes").addEventListener("click", () => storyAction("save", $("#story-save-scenes")));
+  $("#story-rewrite").addEventListener("click", () => storyAction("rewrite", $("#story-rewrite")));
+  $("#story-scenes").addEventListener("input", storyDirty);
+  $("#story-scenes").addEventListener("change", (event) => {
+    if (event.target.dataset.sceneField === "action") {
+      const scene = event.target.closest("[data-story-scene]");
+      if (scene) { $("[data-story-beats]", scene).innerHTML = ""; scene.dataset.motionEdited = "true"; }
+    }
+    storyDirty();
+  });
+  $("#story-scenes").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-scene-regenerate]");
+    if (button) storyAction("regenerate", button, button.dataset.sceneRegenerate);
+    const add = event.target.closest("[data-beat-add]");
+    const remove = event.target.closest("[data-beat-remove]");
+    if ((add || remove) && (storyState.busy || storyJob())) return;
+    if (add) {
+      const container = add.closest("[data-story-scene]");
+      const scene = storyState.project?.scenes?.find((item) => item.id === container.dataset.storyScene);
+      const rows = $$("[data-story-beat]", container);
+      if (!scene || rows.length >= 8) { toast("Use up to eight motion beats in each scene.", true); return; }
+      $("[data-story-beats]", container).insertAdjacentHTML("beforeend", storyBeatMarkup(scene, {at: Math.min(.95, rows.length * .15)}));
+      container.dataset.motionEdited = "true"; storyDirty();
+    }
+    if (remove) { const container = remove.closest("[data-story-scene]"); remove.closest("[data-story-beat]").remove(); container.dataset.motionEdited = "true"; storyDirty(); }
+  });
+  $("#story-new").addEventListener("click", () => {
+    if (storyState.busy || (storyState.dirty && !window.confirm("Start a new project and discard unsaved changes?"))) return;
+    fillStoryProject(null); renderStoryHistory(); $("#story-idea").focus();
+  });
+  $("#story-check-setup").addEventListener("click", async () => { await refreshHealth(); await refreshStories(); });
+  $("#story-preview-voice").addEventListener("click", () => previewStoryVoice(storyFields().voice.value));
+  $("#story-voice").addEventListener("change", renderStoryVoiceControls);
+  $("#story-manage-voices").addEventListener("click", async () => {
+    const library = $("#story-voice-library"); library.open = true;
+    if (typeof library.scrollIntoView === "function") library.scrollIntoView({behavior:"smooth", block:"start"});
+    await refreshStoryVoiceLibrary();
+  });
+  $("#story-refresh-voices").addEventListener("click", () => refreshStoryVoiceLibrary(true));
+  $("#story-voice-library").addEventListener("toggle", () => { if ($("#story-voice-library").open && !storyVoiceState.loaded) refreshStoryVoiceLibrary(); });
+  $("#story-voice-library").addEventListener("click", (event) => {
+    const install = event.target.closest("[data-voice-install]");
+    const preview = event.target.closest("[data-voice-preview]");
+    const use = event.target.closest("[data-voice-use]");
+    const cancel = event.target.closest("[data-voice-job-cancel]");
+    if (install) installStoryVoice(install.dataset.voiceInstall);
+    if (preview) previewStoryVoice(preview.dataset.voicePreview);
+    if (cancel) requestStoryVoiceCancel(cancel.dataset.voiceJobCancel);
+    if (use && !storyState.busy && !storyJob()) {
+      storyFields().voice.value = use.dataset.voiceUse; storyDirty(); renderStoryVoiceControls();
+      toast("Narrator selected for this story.");
+    }
+  });
+  $("#story-voice-preview-cancel").addEventListener("click", () => requestStoryVoiceCancel(storyVoiceState.previewJob));
+  $("#story-history").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-story-open]");
+    if (button) openStory(button.dataset.storyOpen);
+  });
+  $("#story-random").addEventListener("click", () => {
+    const ideas = ["A boy notices that his bedroom window shows a different world every night.", "Every night, the hallway outside her apartment grows one door longer.", "A school security camera records the same student arriving thirty years before he was born.", "A lonely radio operator receives weather reports from tomorrow.", "A child finds a shadow that moves before its owner does.", "The last train arrives with everyone wearing the same watch, stopped at midnight."];
+    storyFields().idea.value = ideas[Math.floor(Math.random() * ideas.length)]; storyDirty();
+  });
+  $("#story-ideas").addEventListener("click", async () => {
+    const restore = startAction($("#story-ideas"), "Thinking…");
+    clearError("#story-error");
+    try {
+      const data = await api("/api/stories/ideas", {genre: storyFields().genre.value, idea: storyFields().idea.value.trim()});
+      storyState.ideasJob = (data.job || data).id;
+      await refreshLibrary(); renderStoryIdeas(); scheduleFastPoll();
+    } catch (error) { showError("#story-error", error); }
+    finally { restore(); renderStoryControls(); }
+  });
+  $("#story-idea-results").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-story-idea]");
+    if (!button) return;
+    const job = state.jobs.find((item) => item.id === storyState.ideasJob);
+    const ideas = job?.result?.ideas || job?.result || [];
+    const idea = ideas[Number(button.dataset.storyIdea)];
+    if (!idea) return;
+    storyFields().idea.value = typeof idea === "string" ? idea : idea.idea || idea.title || "";
+    storyDirty();
+  });
+  $("#story-cancel").addEventListener("click", () => {
+    const job = storyJob();
+    if (!job?.can_cancel || job.cancel_requested) return;
+    $("#cancel-job-form").elements.job_id.value = job.id;
+    $("#cancel-job-name").textContent = job.title || "Story generation";
+    clearError("#cancel-job-error"); $("#cancel-job-dialog").showModal();
+  });
+  $("#story-review").addEventListener("click", async () => {
+    const clipId = storyState.project?.clip_id;
+    if (!clipId) return;
+    await refreshLibrary(); openReview(clipId);
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (storyState.dirty) { event.preventDefault(); event.returnValue = ""; }
+  });
+}
+
 async function init() {
   paintIcons();
   bindEvents();
+  bindStoryEvents();
   navigate();
   renderSources();
   renderJobs();
@@ -969,6 +1548,7 @@ async function init() {
     fillSettings();
     renderHealth();
     applyLibrary(data);
+    if (location.hash === "#stories") await refreshStories();
     pollTimer = setTimeout(poll, activeJobs().length ? 2000 : 8000);
   } catch (error) {
     $("#connection-banner").hidden = false;

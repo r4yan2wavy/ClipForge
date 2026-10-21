@@ -26,6 +26,10 @@ from pydantic import ValidationError
 from . import __version__
 from .common import (DB, Metadata, Settings, SourceManifest, atomic_json, iso_now,
                      load_settings, run_command, sha256_file, stable_id)
+from .story_service import StoryServiceMixin, STORY_KINDS
+from .story_engine import StoryError
+from .story_audio import StoryAudioError
+from .story_voice_service import StoryVoiceServiceMixin, VOICE_KINDS
 
 
 class WebError(ValueError):
@@ -45,6 +49,8 @@ EXPOSED = {
 }
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".ts", ".mts", ".m2ts"}
 ACTIVE = {"queued", "running"}
+FINISHED = {"completed", "failed", "interrupted", "cancelled"}
+CANCELLABLE = {"clip", "link_import"} | STORY_KINDS | VOICE_KINDS
 RESUMABLE = {"ready", "uploading", "retry_wait", "quota_wait", "auth_required"}
 
 
@@ -61,7 +67,7 @@ def _text(value, label, limit=1000, required=True):
     return value.strip()
 
 
-class WebService:
+class WebService(StoryVoiceServiceMixin, StoryServiceMixin):
     def __init__(self, config_path: Path | str, settings: Settings | None = None):
         self.config_path = Path(config_path).resolve()
         if not self.config_path.exists():
@@ -72,6 +78,7 @@ class WebService:
         self.guard = threading.RLock()
         self.stop = threading.Event()
         self.pending = queue.Queue()
+        self.cancel_events = {}
         self.data_dir = self.settings.resolve(self.settings.paths.cache).parent / "studio"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "sources").mkdir(exist_ok=True)
@@ -110,12 +117,16 @@ class WebService:
               CREATE TABLE IF NOT EXISTS web_jobs(id TEXT PRIMARY KEY, data TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS web_clips(clip_id TEXT PRIMARY KEY, source_id TEXT, job_id TEXT);
               CREATE TABLE IF NOT EXISTS web_links(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS web_deleted_clips(clip_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS web_stories(id TEXT PRIMARY KEY, data TEXT NOT NULL);
             """)
             for row in db.conn.execute("SELECT * FROM web_jobs").fetchall():
                 job = json.loads(row["data"])
                 if job["state"] in ACTIVE:
                     job.update(state="interrupted", stage="interrupted", message="ClipForge stopped before this task finished. Retry when ready.")
                     self._save_job(db, job)
+                    if job["kind"] in STORY_KINDS:
+                        self._story_job_finished(db, job)
             for row in db.conn.execute("SELECT * FROM web_links").fetchall():
                 link = json.loads(row["data"])
                 # Upgrade saved references without initiating network requests.
@@ -244,6 +255,9 @@ class WebService:
         return record
 
     def _save_job(self, db, job):
+        event = self.cancel_events.get(job["id"])
+        if event is not None and event.is_set() and job["state"] in ACTIVE:
+            job["cancel_requested"] = True
         db.conn.execute("INSERT OR REPLACE INTO web_jobs VALUES(?,?)", (job["id"], json.dumps(job, allow_nan=False)))
 
     def _job(self, db, job_id):
@@ -253,18 +267,31 @@ class WebService:
         return json.loads(row["data"])
 
     def job_record(self, job, db):
-        record = {k: v for k, v in job.items() if k not in {"payload", "engine_id", "kind", "retry_requested"}}
-        record["can_delete"] = job["state"] in {"completed", "failed", "interrupted"}
+        from .progress import public_timing
+        record = {k: v for k, v in job.items() if k not in {"payload", "engine_id", "kind", "retry_requested", "_timing", "timing_profile", "stage_work_totals", "last_progress_save"}}
+        record["can_delete"] = job["state"] in FINISHED
+        record["can_cancel"] = job["kind"] in CANCELLABLE and job["state"] in ACTIVE and not job.get("cancel_requested")
+        if job["kind"] in STORY_KINDS:
+            record["project_id"] = job["payload"].get("project_id")
+            record["kind"] = job["kind"]
+        if job["kind"] in VOICE_KINDS:
+            record["kind"] = job["kind"]
+            record["voice_catalog_id"] = job["payload"].get("id")
+            record["voice_id"] = job["payload"].get("voice")
         record["source_id"] = self._job_source_id(db, job)
         if job.get("kind", "").startswith("social_"):
             record["platform"] = job["payload"]["platform"]
             record["target_clip_id"] = job["payload"]["clip_id"]
-        if job["state"] == "running" and job.get("engine_id"):
+        if job["state"] == "running" and job.get("engine_id") and not job.get("_timing"):
             row = db.conn.execute("SELECT state FROM jobs WHERE id=?", (job["engine_id"],)).fetchone()
             if row and row["state"] in {"TRANSCRIBING", "SELECTING", "RENDERING"}:
                 stage = row["state"].lower()
                 record.update(stage=stage, progress={"transcribing": 20, "selecting": 45, "rendering": 65}[stage],
                               message={"transcribing": "Transcribing speech locally…", "selecting": "Finding clips with your local model…", "rendering": "Rendering vertical clips…"}[stage])
+        history = [json.loads(row["data"]) for row in db.conn.execute("SELECT data FROM web_jobs ORDER BY rowid DESC LIMIT 100")]
+        record.update(public_timing(job, history))
+        if job.get("cancel_requested") and job["state"] in ACTIVE:
+            record["message"] = "Stopping this task and cleaning up unfinished files…"
         return record
 
     def _job_source_id(self, db, job):
@@ -297,6 +324,7 @@ class WebService:
         can_resume, resume_message = self._resume_availability(artifact, dict(publication) if publication else None)
         from .social_publish import public_records
         social = public_records(db, clip_id)
+        can_delete, delete_message = self._clip_delete_status(db, clip_id)
         return {"id": clip_id, "job_id": link["job_id"] if link else artifact.get("job_id"), "title": meta.get("title", "Untitled clip"),
                 "description": meta.get("description", ""), "tags": meta.get("tags", []),
                 "duration_s": float(candidate.get("end_s", 0)) - float(candidate.get("start_s", 0)),
@@ -309,7 +337,19 @@ class WebService:
                 "submitted": bool(publication or social), "social_publications": social,
                 "is_demo": bool(source.get("is_demo") or artifact.get("web_is_demo")),
                 "can_resume": can_resume, "resume_message": resume_message,
+                "can_delete": can_delete, "delete_message": delete_message,
                 "publication": _public(dict(publication)) if publication else None}
+
+    def _clip_delete_status(self, db, clip_id):
+        if self._active(db):
+            return False, "Wait for the current tasks to finish before deleting clip files."
+        for row in db.conn.execute("SELECT state, video_id FROM publications WHERE clip_id=?", (clip_id,)):
+            if not row["video_id"]:
+                return False, "This clip has an unfinished or uncertain YouTube upload. Resolve that upload before deleting its files."
+        for row in db.conn.execute("SELECT state FROM social_publications WHERE clip_id=?", (clip_id,)):
+            if row["state"] not in {"published", "failed", "rejected"}:
+                return False, "Finish or resolve this clip's platform upload before deleting its files."
+        return True, "Delete this finished clip and its captions from this computer."
 
     @staticmethod
     def _intent_fingerprint(publication):
@@ -480,7 +520,7 @@ class WebService:
             raise WebError("Choose whether to delete the source video file.")
         with self.guard, self.db() as db:
             job = self._job(db, job_id)
-            if job["state"] not in {"completed", "failed", "interrupted"}:
+            if job["state"] not in FINISHED:
                 raise WebError("Wait for this task to finish before deleting it.", 409)
             if payload.get("delete_source"):
                 source_id = self._job_source_id(db, job)
@@ -489,11 +529,142 @@ class WebService:
                 self.delete_source(source_id, {"confirmed": True})
             # Only remove workshop history. Artifacts and publication records
             # have independent lifetimes and must survive this deletion.
+            self._delete_voice_preview(job)
             db.conn.execute("DELETE FROM web_jobs WHERE id=?", (job_id,))
             return {"deleted": job_id}
 
+    def cancel_job(self, job_id, payload):
+        _strict_keys(payload, {"confirmed"})
+        if payload.get("confirmed") is not True:
+            raise WebError("Confirm you want to stop this task.")
+        with self.guard, self.db() as db:
+            job = self._job(db, job_id)
+            if job["kind"] not in CANCELLABLE:
+                raise WebError("This action cannot be stopped here. Follow its saved publication status.", 409)
+            if job["state"] not in ACTIVE:
+                raise WebError("This task has already stopped.", 409)
+            event = self.cancel_events.setdefault(job_id, threading.Event())
+            event.set()
+            job["cancel_requested"] = True
+            if job["state"] == "queued":
+                self._mark_cancelled(db, job)
+            else:
+                job["message"] = "Stopping this task and cleaning up unfinished files…"
+            self._save_job(db, job)
+            return {"job": self.job_record(job, db)}
+
+    def _mark_cancelled(self, db, job):
+        job.update(state="cancelled", stage="cancelled", progress=0, cancel_requested=False, message="Task stopped. Finished clips and source videos are kept.")
+        if job["kind"] == "link_import":
+            link = self._link(db, job["payload"]["link_id"])
+            link.update(state="failed", message="Download cancelled. Choose Retry import to start again.")
+            self._save_link(db, link)
+        if job["kind"] in STORY_KINDS:
+            job["message"] = "Story task stopped. Your saved storyboard and completed exports are kept."
+            self._story_job_finished(db, job)
+        if job["kind"] in VOICE_KINDS:
+            job["message"] = "Voice task stopped. Installed voices and saved stories are kept."
+
+    def _keep_completed_clips(self, db, job):
+        """A cancellation stops future work without discarding completed renders."""
+        from .worker import _artifact_intact
+        for row in db.conn.execute("SELECT * FROM artifacts WHERE job_id=? AND active=1", (job.get("engine_id", job["id"]),)).fetchall():
+            folder = Path(row["artifact_dir"])
+            if _artifact_intact(folder, row["render_sha256"]):
+                db.conn.execute("INSERT OR REPLACE INTO web_clips VALUES(?,?,?)", (row["clip_id"], job["source_id"], job["id"]))
+                if row["clip_id"] not in job["clip_ids"]:
+                    job["clip_ids"].append(row["clip_id"])
+
+    def _clean_unfinished_manual(self, db, job):
+        if job["kind"] != "clip" or job.get("mode") != "manual":
+            return
+        clip_id = "manual-" + job["id"]
+        if db.conn.execute("SELECT 1 FROM artifacts WHERE clip_id=?", (clip_id,)).fetchone():
+            return
+        root = self.settings.resolve(self.settings.paths.prepared)
+        folder = root / clip_id
+        if not folder.exists():
+            return
+        try:
+            def redirected(path):
+                return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+            if redirected(root) or redirected(folder) or folder.resolve().parent != root.resolve():
+                return
+            remaining = [folder]
+            while remaining:
+                for path in remaining.pop().iterdir():
+                    if redirected(path):
+                        return
+                    if path.is_dir():
+                        remaining.append(path)
+            if any(Path(source["path"]).resolve().is_relative_to(folder.resolve()) for source in self._sources(db)):
+                return
+            shutil.rmtree(folder)
+        except OSError:
+            job["cleanup_pending"] = True
+
+    def delete_clip(self, clip_id, payload):
+        _strict_keys(payload, {"confirmed"})
+        if payload.get("confirmed") is not True:
+            raise WebError("Confirm you want to delete this finished clip and its captions from this computer.")
+        try:
+            with self.guard, self.engine_lock(), self.db() as db:
+                folder, artifact = self._artifact(db, clip_id)
+                allowed, message = self._clip_delete_status(db, clip_id)
+                if not allowed:
+                    raise WebError(message, 409)
+                root = self.settings.resolve(self.settings.paths.prepared)
+                # Only a direct, real artifact directory inside configured output
+                # storage may be removed. Never follow reparse points or a source.
+                def redirected(path):
+                    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+                if (redirected(root) or redirected(folder) or not folder.is_dir()
+                        or folder.resolve().parent != root.resolve()
+                        or folder.name != clip_id):
+                    raise WebError("This clip is outside ClipForge's managed output folder and cannot be deleted here.", 409)
+                entries, remaining = [], [folder]
+                while remaining:
+                    for path in remaining.pop().iterdir():
+                        if redirected(path):
+                            raise WebError("This clip folder contains a linked file or directory and cannot be deleted safely.", 409)
+                        entries.append(path)
+                        if path.is_dir():
+                            remaining.append(path)
+                for source in self._sources(db):
+                    if Path(source["path"]).resolve().is_relative_to(folder.resolve()):
+                        raise WebError("This folder also contains a registered source video. Move the source before deleting this clip.", 409)
+                other = db.conn.execute("SELECT artifact_dir FROM artifacts WHERE clip_id<>?", (clip_id,)).fetchall()
+                if any(Path(row["artifact_dir"]).resolve().is_relative_to(folder.resolve()) for row in other):
+                    raise WebError("This output folder is shared by another clip and cannot be deleted here.", 409)
+                freed = sum(path.stat().st_size for path in entries if path.is_file())
+                # Keep the artifact identity and publication history as tombstones
+                # so retrying an old job cannot recreate or re-upload this clip.
+                try:
+                    shutil.rmtree(folder)
+                except OSError:
+                    # Windows may remove some metadata before an open video
+                    # blocks deletion. Keep the local entry usable for retry.
+                    try:
+                        atomic_json(folder / "artifact.json", artifact)
+                    except OSError:
+                        pass
+                    raise WebError("The clip files could not all be deleted. Close other apps using the clip, then retry.", 409) from None
+                with db.transaction():
+                    db.conn.execute("INSERT OR REPLACE INTO web_deleted_clips VALUES(?,?)", (clip_id, iso_now()))
+                    db.conn.execute("UPDATE artifacts SET active=0 WHERE clip_id=?", (clip_id,))
+                    db.conn.execute("DELETE FROM web_clips WHERE clip_id=?", (clip_id,))
+                    for row in db.conn.execute("SELECT data FROM web_jobs").fetchall():
+                        job = json.loads(row["data"])
+                        if clip_id in job.get("clip_ids", []):
+                            job["clip_ids"].remove(clip_id)
+                            self._save_job(db, job)
+                return {"deleted": clip_id, "bytes_freed": freed}
+        except Timeout:
+            raise WebError("A task is using this workspace. Wait for it to finish before deleting clip files.", 409) from None
+
     def _import_link_task(self, db, job):
         from .link_import import LinkError, VIDEO_EXTENSIONS, download_video, twitch_download, twitch_status, describe
+        from .job_control import checkpoint, JobCancelled
         import urllib.parse
         link = self._link(db, job["payload"]["link_id"])
         target = None
@@ -519,6 +690,7 @@ class WebService:
             last_progress = [0.0, ""]
 
             def progress(stage, received=0, total=None):
+                checkpoint()
                 now = time.monotonic()
                 if stage == last_progress[1] and now - last_progress[0] < .5:
                     return
@@ -526,6 +698,9 @@ class WebService:
                 if job.get("stage") != stage:
                     self._stage(db, job, stage)
                 job.update(download_bytes=int(received), download_total_bytes=total)
+                from .progress import update_progress
+                if stage == "downloading":
+                    update_progress(job, received, total)
                 if stage == "downloading":
                     job["message"] = f"Downloading to this computer · {received / 1024**2:.1f} MiB received…"
                     job["progress"] = min(85, 10 + 75 * received / total) if total else 20
@@ -534,14 +709,17 @@ class WebService:
             if describe(link["url"]).get("page_import") and not official:
                 from .page_import import page_download
                 result = page_download(url, target, ffmpeg=self.settings.render.ffmpeg,
-                                       cancelled=self.stop.is_set, progress=progress)
+                                       cancelled=lambda: self.stop.is_set() or self.cancel_events[job["id"]].is_set(), progress=progress)
                 if Path(result["path"]).resolve() != target.resolve():
                     raise LinkError("The downloaded video could not be registered safely.")
                 name = result["title"]
             else:
                 self._stage(db, job, "downloading")
-                download_video(url, target, twitch=official, cancelled=self.stop.is_set,
-                               progress=lambda amount: progress("downloading", amount))
+                download_video(url, target, twitch=official,
+                               cancelled=lambda: self.stop.is_set() or self.cancel_events[job["id"]].is_set(),
+                               progress=lambda amount: progress("downloading", amount, job.get("download_total_bytes")),
+                               progress_details=lambda amount, total: progress("downloading", amount, total))
+            checkpoint()
             self._stage(db, job, "verifying")
             source = self.register_source(target, name + extension)
             job["source_id"] = source["id"]
@@ -555,6 +733,9 @@ class WebService:
         except Exception as exc:
             if target:
                 target.unlink(missing_ok=True)
+            if isinstance(exc, JobCancelled):
+                raise
+            checkpoint()
             message = str(exc) if isinstance(exc, (LinkError, WebError)) else "The video import could not finish. Check the link and local tools, then retry explicitly."
             link.update(state="failed", message=message)
             self._save_link(db, link)
@@ -642,7 +823,7 @@ class WebService:
         return self.register_source(path, "Synthetic sample · test pattern and tone", True)
 
     def _active(self, db):
-        return any(json.loads(r["data"])["state"] in ACTIVE for r in db.conn.execute("SELECT data FROM web_jobs"))
+        return any(json.loads(r["data"]).get("state") in ACTIVE for r in db.conn.execute("SELECT data FROM web_jobs"))
 
     def update_settings(self, payload):
         _strict_keys(payload, EXPOSED)
@@ -709,10 +890,17 @@ class WebService:
             raise WebError("The queue is full. Let a few tasks finish before adding more.", 409)
         job = {"id": uuid.uuid4().hex, "kind": kind, "payload": payload,
                "source_id": source["id"] if source else None,
-               "source_name": source["name"] if source else ("Video link" if kind == "link_import" else payload.get("platform", "YouTube").title()),
+               "source_name": source["name"] if source else ("AI Story Generator" if kind in STORY_KINDS else "Local voices" if kind in VOICE_KINDS else "Video link" if kind == "link_import" else payload.get("platform", "YouTube").title()),
                "title": title or kind.replace("_", " ").title(), "mode": payload.get("mode", kind),
                "state": "queued", "stage": "queued", "message": "Waiting for the local worker…", "progress": 0,
                "created_at": iso_now(), "clip_ids": []}
+        if kind in CANCELLABLE:
+            self.cancel_events[job["id"]] = threading.Event()
+        if kind == "clip":
+            job["timing_profile"] = stable_id({"speech": self.settings.speech.model_dump(), "brain": self.settings.brain.model_dump(), "render": self.settings.render.model_dump()})
+            job["stage_work_totals"] = {"transcribing": source["duration_s"]}
+            if payload.get("mode") == "manual":
+                job["stage_work_totals"]["rendering"] = payload["end_s"] - payload["start_s"]
         if kind == "clip" and payload.get("mode") == "ai":
             job["engine_id"] = stable_id(str((self.data_dir / "manifests" / (job["id"] + ".json")).resolve()))
         self._save_job(db, job)
@@ -722,26 +910,60 @@ class WebService:
     def retry(self, job_id):
         with self.guard, self.db() as db:
             job = self._job(db, job_id)
-            if job["state"] not in {"failed", "interrupted"}:
-                raise WebError("Only failed or interrupted tasks can be retried.", 409)
+            if job["state"] not in {"failed", "interrupted", "cancelled"}:
+                raise WebError("Only failed, interrupted or cancelled tasks can be retried.", 409)
+            if job["kind"] in STORY_KINDS:
+                if job["kind"] == "story_ideas":
+                    return self.story_ideas(job["payload"])
+                action = {"story": "generate", "story_rewrite": "rewrite", "story_scene": "scene"}[job["kind"]]
+                return self.story_action(job["payload"]["project_id"], action, {}, job["payload"].get("scene_id"))
+            if job["kind"] in VOICE_KINDS:
+                return self.story_voice_action("install" if job["kind"] == "story_voice_install" else "preview", job["payload"])
             if job["kind"] != "clip":
                 raise WebError("Use the saved link or platform publishing controls to continue this task explicitly.", 409)
-            job.update(state="queued", stage="queued", message="Waiting to retry…", progress=0)
+            from .progress import start_stage
+            start_stage(job, "queued")
+            self.cancel_events[job_id] = threading.Event()
+            job.update(state="queued", stage="queued", message="Waiting to retry…", progress=0, cancel_requested=False)
+            for key in ("result_message", "download_bytes", "download_total_bytes", "last_progress_save"):
+                job.pop(key, None)
             job["retry_requested"] = True
             self._save_job(db, job)
             self.pending.put(job_id)
             return {"job": self.job_record(job, db)}
 
     def _stage(self, db, job, stage):
+        from .progress import start_stage
+        start_stage(job, stage)
         messages = {"preparing": "Checking the source and local tools…", "rendering": "Rendering your vertical clip…",
+                    "transcribing": "Transcribing speech locally…", "selecting": "Finding clips with your local model…",
+                    "metadata": "Writing titles and descriptions with your local model…",
                     "verifying": "Checking the rendered clip…", "authorizing": "Complete YouTube consent in the browser window…",
                     "publishing": "Sending the reviewed clip to YouTube…", "polling": "Checking YouTube processing status…", "revoking": "Disconnecting YouTube…",
                     "downloading": "Downloading the authorized video into your local library…",
                     "resolving": "Reading the video page for accessible media…", "merging": "Combining the downloaded audio and video locally…",
                     "social_publishing": "Sending the reviewed clip to the selected platform…",
-                    "social_polling": "Checking the selected platform's processing status…"}
+                    "social_polling": "Checking the selected platform's processing status…",
+                    "story_writing": "Writing your story and storyboard with the local model…",
+                    "story_narrating": "Recording your story with the selected local narrator…",
+                    "story_audio": "Mixing narration, original background music and sound effects…",
+                    "story_rendering": "Animating your characters, camera and captions…",
+                    "story_voice_download": "Downloading your selected voice for offline narration…",
+                    "story_voice_preview": "Recording a short sample with your selected voice…"}
         job.update(stage=stage, message=messages.get(stage, stage.title()), progress={"preparing": 5, "rendering": 40, "verifying": 90}.get(stage, 20))
         self._save_job(db, job)
+
+    def _job_progress(self, db, job, stage, completed=None, total=None):
+        from .progress import update_progress
+        changed = job.get("stage") != stage
+        if changed:
+            self._stage(db, job, stage)
+        if completed is not None:
+            update_progress(job, completed, total)
+        now = time.monotonic()
+        if changed or now - job.get("last_progress_save", 0) >= .5:
+            job["last_progress_save"] = now
+            self._save_job(db, job)
 
     def _work(self):
         next_maintenance = time.monotonic() + 3600
@@ -763,10 +985,27 @@ class WebService:
             if job_id is None:
                 break
             with self.db() as db:
-                job = self._job(db, job_id)
+                with self.guard:
+                    try:
+                        job = self._job(db, job_id)
+                    except WebError:
+                        # Cancelled queue entries may be removed from history.
+                        self.cancel_events.pop(job_id, None)
+                        continue
+                    if job["state"] != "queued":
+                        self.cancel_events.pop(job_id, None)
+                        continue
+                    event = self.cancel_events.setdefault(job_id, threading.Event())
+                    # Cancellation/deletion cannot race a stale queued copy.
+                    job.update(state="running")
+                    self._save_job(db, job)
+                from .job_control import JobCancelled, job_control, checkpoint
+                from .progress import finish_timing
                 try:
-                    with self.engine_lock():
-                        job.update(state="running")
+                    with self.engine_lock(), job_control(
+                            cancelled=lambda: job["kind"] in CANCELLABLE and (self.stop.is_set() or event.is_set()),
+                            on_progress=lambda stage, completed, total: self._job_progress(db, job, stage, completed, total)):
+                        checkpoint()
                         self._stage(db, job, "preparing")
                         from .upload import expire_owner_observations
                         from .sourcing import purge
@@ -776,15 +1015,28 @@ class WebService:
                             self._prepare(db, job)
                         elif job["kind"] == "link_import":
                             self._import_link_task(db, job)
+                        elif job["kind"] in STORY_KINDS:
+                            self._story_task(db, job)
+                        elif job["kind"] in VOICE_KINDS:
+                            self._story_voice_task(db, job)
                         elif job["kind"].startswith("social_"):
                             self._social_task(db, job)
                         else:
                             self._youtube_task(db, job)
                         job.update(state="completed", stage="ready", progress=100,
                                    message=job.get("result_message", "Ready for your review."))
+                except JobCancelled:
+                    if job["kind"] == "clip":
+                        self._keep_completed_clips(db, job)
+                        self._clean_unfinished_manual(db, job)
+                    self._mark_cancelled(db, job)
+                    if job.get("cleanup_pending"):
+                        job["message"] = "Task stopped. An unfinished clip file is still in use; close its preview and retry the task to replace it."
                 except Timeout:
                     job.update(state="failed", stage="failed", message="Another ClipForge command is running. Retry when it finishes.")
                 except WebError as exc:
+                    job.update(state="failed", stage="failed", message=str(exc))
+                except (StoryError, StoryAudioError) as exc:
                     job.update(state="failed", stage="failed", message=str(exc))
                 except FileNotFoundError:
                     job.update(state="failed", stage="failed", message="A source, model or executable is missing. Check Settings and the original video, then retry.")
@@ -796,7 +1048,14 @@ class WebService:
                     if link["state"] == "importing":
                         link.update(state="failed", message=job["message"])
                         self._save_link(db, link)
-                self._save_job(db, job)
+                with self.guard:
+                    finish_timing(job)
+                    job["cancel_requested"] = False
+                    self._save_job(db, job)
+                    if job["kind"] in STORY_KINDS:
+                        self._story_job_finished(db, job)
+                    if self.cancel_events.get(job_id) is event:
+                        self.cancel_events.pop(job_id, None)
 
     def _prepare(self, db, job):
         from .worker import prepare_manifest, verify_artifact
@@ -813,7 +1072,7 @@ class WebService:
             if not dirs:
                 state = result.get("state", "failed")
                 if state == "NO_CANDIDATES":
-                    job["result_message"] = "No suitable speech clips were found. Try manual mode or another source."
+                    job["result_message"] = ("Previously deleted clips were skipped. Choose a different cut to create a new clip." if result.get("deleted_clips") else "No suitable speech clips were found. Try manual mode or another source.")
                     return
                 reason = result.get("reason")
                 if reason and len(reason) < 400 and not any(x in reason.lower() for x in ("http", "token", "secret")):
@@ -829,6 +1088,8 @@ class WebService:
             from .web_render import render_manual
             folder = self.settings.resolve(self.settings.paths.prepared) / ("manual-" + job["id"])
             clip_id = "manual-" + job["id"]
+            if db.conn.execute("SELECT 1 FROM web_deleted_clips WHERE clip_id=?", (clip_id,)).fetchone():
+                raise WebError("This clip was deleted. Create a new clip instead of retrying its old task.", 409)
             existing = db.conn.execute("SELECT 1 FROM publications WHERE clip_id=?", (clip_id,)).fetchone()
             if existing:
                 raise WebError("This clip already has a publication record. Its existing files must be preserved.", 409)
@@ -1035,6 +1296,11 @@ class WebService:
                 raise WebError("Enable YouTube publishing and configure the target channel in Settings first.", 409)
             if record["publication"]:
                 raise WebError("This clip already has a saved publication. Use Resume upload or refresh its publishing status.", 409)
+            if any(json.loads(row["data"]).get("payload", {}).get("clip_id") == clip_id
+                   and json.loads(row["data"]).get("kind") in {"publish", "resume"}
+                   and json.loads(row["data"]).get("state") in ACTIVE
+                   for row in db.conn.execute("SELECT data FROM web_jobs")):
+                raise WebError("A YouTube upload for this clip is already queued or running.", 409)
             payload = dict(payload, clip_id=clip_id, reviewed_artifact_hash=stable_id(artifact))
             return self._enqueue(db, "publish", payload, title="Publish " + record["title"])
 

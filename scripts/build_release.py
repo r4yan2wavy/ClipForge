@@ -19,12 +19,16 @@ if not (root / notes).is_file():
 archive = Path(f"dist/clipforge-v{version}.zip")
 (root / archive).parent.mkdir(exist_ok=True)
 subprocess.run(["git", "archive", "--format=zip", "--prefix=clipforge/", "-o", str(archive), "HEAD"], cwd=root, check=True)
-private = {".venv", "__pycache__", ".pytest_cache", ".git", "secrets", "data", "inbox", "prepared", "models"}
+private = {".venv", "__pycache__", ".pytest_cache", ".git", "secrets", "data", "inbox", "prepared", "models", "work", "build", "dist"}
 with zipfile.ZipFile(root / archive) as package:
     for name in package.namelist():
         path = Path(name)
         relative = Path(*path.parts[1:]).as_posix()
-        if private.intersection(path.parts) or relative == "config.json" or path.name.startswith(".env"):
+        root_name = Path(relative).parts[0] if Path(relative).parts else ""
+        if (private.intersection(path.parts) or any(part.endswith(".egg-info") for part in path.parts)
+                or relative == "config.json" or root_name.startswith("client_secret")
+                or (path.name.startswith(".env") and path.name != ".env.example")
+                or path.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".log", ".pyc", ".onnx", ".gguf"}):
             raise SystemExit(f"Private runtime path in release: {name}")
     if package.testzip() is not None:
         raise SystemExit("Release ZIP failed its integrity check")

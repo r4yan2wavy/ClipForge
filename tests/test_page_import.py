@@ -12,6 +12,20 @@ from clipforge import page_import as page
 YOUTUBE = "https://www.youtube.com/watch?v=abcdefghijk"
 
 
+def test_display_progress_uses_current_stream_bytes_not_wire_overhead(tmp_path, monkeypatch):
+    monkeypatch.setattr(page, "_runtime", lambda: ("node", "node"))
+    transfer = page._Transfer(tmp_path)
+    transfer.received = 80
+    hook = page._options(tmp_path, "ffmpeg", transfer)["progress_hooks"][0]
+    hook({"status": "downloading", "downloaded_bytes": 10, "total_bytes": 100})
+    saved = page._read_json(tmp_path / "progress.json")
+    assert saved["stage"] == "downloading"
+    assert saved["received"] == 10 and saved["total"] == 100
+    assert transfer.received == 80  # The separate network safety cap stays intact.
+    hook({"status": "finished", "downloaded_bytes": 100, "total_bytes": 100})
+    assert page._read_json(tmp_path / "progress.json")["stage"] == "merging"
+
+
 @pytest.fixture(autouse=True)
 def no_live_network(monkeypatch):
     def forbidden(*args, **kwargs):

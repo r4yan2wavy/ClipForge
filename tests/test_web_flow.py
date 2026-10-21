@@ -121,12 +121,35 @@ class LocalStudioFlowTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
             server = create_server(config, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            token = server.service.token
             try:
                 restored = server.service.library()
                 self.assertEqual(restored["clips"][0]["title"], "Reviewed local clip")
                 self.assertEqual(restored["clips"][0]["state"], "PREPARED")
                 self.assertEqual(len(restored["sources"]), 1)
                 self.assertEqual(restored["jobs"][0]["state"], "completed")
+                with server.service.db() as db:
+                    output_folder, _ = server.service._artifact(db, clip["id"])
+                self.assertEqual(request("POST", f"/api/clips/{clip['id']}/delete", {"confirmed": False})[0], 400)
+                self.assertTrue(output_folder.is_dir())
+                status, _, body = request("POST", f"/api/clips/{clip['id']}/delete", {"confirmed": True})
+                self.assertEqual(status, 200, body)
+                self.assertGreater(json.loads(body)["bytes_freed"], 1000)
+                self.assertFalse(output_folder.exists())
+                self.assertTrue(source.is_file(), "The operator's original recording is preserved")
+                self.assertEqual(request("GET", clip["download_url"])[0], 404)
+                self.assertEqual(request("GET", clip["caption_url"])[0], 404)
+                self.assertEqual(json.loads(request("GET", "/api/library")[2])["clips"], [])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+            server = create_server(config, port=0)
+            try:
+                self.assertEqual(server.service.library()["clips"], [])
+                self.assertTrue(source.is_file())
             finally:
                 server.server_close()
 

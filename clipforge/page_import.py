@@ -117,13 +117,15 @@ class _Transfer:
         if shutil.disk_usage(self.workspace).free < RESERVE_BYTES:
             raise LinkError("There is not enough free disk space for this video.")
 
-    def progress(self, stage, total=None, force=False):
+    def progress(self, stage, total=None, force=False, received=None):
         self.check()
         now = time.monotonic()
         if force or now - self.last_progress >= 0.4:
             self.last_progress = now
             _write_json(self.workspace / "progress.json", {
-                "stage": stage, "received": self.received,
+                # Wire bytes enforce the import cap, while yt-dlp's current
+                # stream bytes measure display progress without page overhead.
+                "stage": stage, "received": self.received if received is None else received,
                 "total": total if isinstance(total, (int, float)) and 0 < total <= MAX_BYTES else None,
             })
 
@@ -215,8 +217,12 @@ def _options(workspace, ffmpeg, transfer):
         return None
 
     def hook(value):
+        amount = value.get("downloaded_bytes")
+        measured = isinstance(amount, (int, float)) and not isinstance(amount, bool) and 0 <= amount <= MAX_BYTES
         transfer.progress("downloading" if value.get("status") != "finished" else "merging",
-                          value.get("total_bytes") or value.get("total_bytes_estimate"))
+                          (value.get("total_bytes") or value.get("total_bytes_estimate")) if measured else None,
+                          force=value.get("status") == "finished",
+                          received=int(amount) if measured else None)
 
     return {
         "quiet": True, "no_warnings": True, "logger": _QuietLogger(),

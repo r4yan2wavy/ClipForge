@@ -6,8 +6,11 @@ import json
 import logging
 import math
 import os
+import queue
 import sqlite3
 import subprocess
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -291,9 +294,11 @@ def iso_now() -> str:
 
 
 def sha256_file(path: Path) -> str:
+    from .job_control import checkpoint
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
+            checkpoint()
             digest.update(block)
     return digest.hexdigest()
 
@@ -310,10 +315,124 @@ def atomic_json(path: Path, value: Any) -> None:
     os.replace(temp, path)
 
 
-def run_command(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+def run_command(args: list[str], *, on_stdout=None, **kwargs) -> subprocess.CompletedProcess:
     # Never use shell=True. Do not include user/AI strings in executable code.
-    return subprocess.run([str(a) for a in args], check=True, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", **kwargs)
+    from .job_control import checkpoint, controlled
+    command = [str(a) for a in args]
+    if not controlled() and on_stdout is None:
+        return subprocess.run(command, check=True, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", **kwargs)
+    checkpoint()
+    timeout = kwargs.pop("timeout", None)
+    input_value = kwargs.pop("input", None)
+    if input_value is not None:
+        if kwargs.get("stdin") is not None:
+            raise ValueError("stdin and input arguments may not both be used.")
+        kwargs["stdin"] = subprocess.PIPE
+    if on_stdout is not None:
+        return _stream_command(command, on_stdout, timeout, input_value, kwargs)
+    started = time.monotonic()
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, encoding="utf-8", errors="replace", **kwargs) as process:
+        try:
+            while True:
+                checkpoint()
+                remaining = None if timeout is None else timeout - (time.monotonic() - started)
+                if remaining is not None and remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    stdout, stderr = process.communicate(input=input_value,
+                        timeout=min(.2, remaining) if remaining is not None else .2)
+                    break
+                except subprocess.TimeoutExpired:
+                    input_value = None
+            checkpoint()
+        except BaseException as error:
+            # Reap the encoder before its temporary directory is removed so
+            # this process cannot keep writing files after cancellation returns.
+            if process.poll() is None:
+                process.terminate()
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+            if isinstance(error, subprocess.TimeoutExpired):
+                error.output, error.stderr = stdout, stderr
+            raise
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command,
+                                                output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _stream_command(command, on_stdout, timeout, input_value, kwargs):
+    """Read progress with pipe-reader threads on Windows as well as POSIX.
+
+    Windows communicate() does not expose partial pipe contents on timeout.
+    Collectors only queue text; the worker thread invokes the progress callback
+    itself so its SQLite connection and job context stay on their owning thread.
+    """
+    from .job_control import checkpoint
+    output, errors, lines = [], [], queue.Queue()
+    started = time.monotonic()
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, encoding="utf-8", errors="replace", **kwargs) as process:
+        def collect(stream, target, progress=False):
+            try:
+                for line in stream:
+                    target.append(line)
+                    if progress:
+                        lines.put(line.rstrip("\r\n"))
+            finally:
+                stream.close()
+
+        readers = [threading.Thread(target=collect, args=(process.stdout, output, True), daemon=True),
+                   threading.Thread(target=collect, args=(process.stderr, errors), daemon=True)]
+        for reader in readers:
+            reader.start()
+
+        def notify():
+            while True:
+                try:
+                    on_stdout(lines.get_nowait())
+                except queue.Empty:
+                    return
+
+        try:
+            if input_value is not None:
+                try:
+                    process.stdin.write(input_value)
+                except BrokenPipeError:
+                    pass
+                process.stdin.close()
+            while process.poll() is None:
+                checkpoint()
+                notify()
+                if timeout is not None and time.monotonic() - started >= timeout:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                time.sleep(.05)
+            for reader in readers:
+                reader.join()
+            notify()
+            checkpoint()
+        except BaseException as error:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            for reader in readers:
+                reader.join()
+            if isinstance(error, subprocess.TimeoutExpired):
+                error.output, error.stderr = "".join(output), "".join(errors)
+            raise
+        stdout, stderr = "".join(output), "".join(errors)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 class DB:

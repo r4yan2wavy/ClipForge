@@ -207,7 +207,8 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             raise
 
 
-def download_video(url, destination, *, twitch=False, cancelled=lambda: False, progress=lambda amount: None):
+def download_video(url, destination, *, twitch=False, cancelled=lambda: False, progress=lambda amount: None,
+                   progress_details=None):
     """Download to a private staging file, with no cookies, proxies or API tokens."""
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -252,6 +253,8 @@ def download_video(url, destination, *, twitch=False, cancelled=lambda: False, p
                     if shutil.disk_usage(destination.parent).free < int(length) + 100 * 1024**2:
                         raise LinkError("There is not enough free disk space for this video.")
                 total = 0
+                if progress_details:
+                    progress_details(0, int(length) if length is not None else None)
                 with staging.open("xb") as handle:
                     while True:
                         if cancelled() or time.monotonic() - started > MAX_SECONDS:
@@ -263,6 +266,8 @@ def download_video(url, destination, *, twitch=False, cancelled=lambda: False, p
                         if total > MAX_BYTES:
                             raise LinkError("This video exceeds the 10 GiB import limit.")
                         handle.write(chunk)
+                        if progress_details:
+                            progress_details(total, int(length) if length is not None else None)
                         progress(total)
                 if not total or (length is not None and total != int(length)):
                     raise LinkError("The video transfer ended before the complete file arrived.")

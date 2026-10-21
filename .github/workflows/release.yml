@@ -24,10 +24,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Check the release
         run: |
-          python -m pip install -e '.[dev,links]'
+          python -m pip install -e '.[dev,links,stories]'
           python -m pytest -q
+          node --check clipforge/web_static/app.js
+          node tests/studio_ui_checks.js
+          node tests/story_ui_checks.js
+          node tests/story_voice_ui_checks.js
       - name: Package the committed public source
         id: package
         run: python scripts/build_release.py

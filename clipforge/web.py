@@ -184,17 +184,27 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             self._json(self.service.library())
         elif path == "/api/health":
             self._json(self.service.health())
+        elif path == "/api/stories":
+            self._json(self.service.stories())
+        elif path == "/api/story-voices":
+            self._json(self.service.story_voices(refresh=query.get("refresh") == ["1"]))
+        elif match := re.fullmatch(rf"/api/stories/({ENTITY})", path):
+            self._json(self.service.get_story(match[1]))
         elif match := re.fullmatch(r"/api/social/(instagram|tiktok)/creator", path):
             self._json(self.service.social_creator(match[1]))
         elif match := re.fullmatch(rf"/api/clips/({ENTITY})", path):
             self._json(self.service.get_clip(match[1]))
+        elif match := re.fullmatch(rf"/media/story-voice/({ENTITY})", path):
+            media, name = self.service.story_voice_media(match[1])
+            self._file(media, ranges=True)
         elif match := re.fullmatch(rf"/media/(source|clip|caption)/({ENTITY})", path):
             media, name = self.service.media(match[1], match[2])
             self._file(media, name if query.get("download") == ["1"] or match[1] == "caption" else None, ranges=True)
         elif path.startswith("/api/") or path.startswith("/media/"):
             raise WebError("This page or media item could not be found.", 404)
-        elif path in {"/guide/links", "/guide/social"}:
-            name = "link-import.md" if path.endswith("links") else "social-publishing.md"
+        elif path in {"/guide/links", "/guide/social", "/guide/stories"}:
+            name = {"/guide/links": "link-import.md", "/guide/social": "social-publishing.md",
+                    "/guide/stories": "story-generator.md"}[path]
             document = Path(__file__).with_name("guides") / name
             if not document.is_file():
                 document = STATIC_DIR.parent.parent / "docs" / name
@@ -225,7 +235,21 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             self._upload(query)
             return
         data = self._body()
-        if path == "/api/import":
+        if path == "/api/stories":
+            self._json(self.service.create_story(data), 201)
+        elif match := re.fullmatch(r"/api/story-voices/(install|preview)", path):
+            self._json(self.service.story_voice_action(match[1], data), 202)
+        elif path == "/api/stories/ideas":
+            self._json(self.service.story_ideas(data), 202)
+        elif path == "/api/stories/batch":
+            self._json(self.service.story_batch(data), 202)
+        elif match := re.fullmatch(rf"/api/stories/({ENTITY})/save", path):
+            self._json(self.service.save_story(match[1], data))
+        elif match := re.fullmatch(rf"/api/stories/({ENTITY})/(generate|rewrite)", path):
+            self._json(self.service.story_action(match[1], match[2], data), 202)
+        elif match := re.fullmatch(rf"/api/stories/({ENTITY})/scenes/({ENTITY})/regenerate", path):
+            self._json(self.service.story_action(match[1], "scene", data, match[2]), 202)
+        elif path == "/api/import":
             if set(data) != {"path"} or not isinstance(data["path"], str) or not data["path"].strip() or len(data["path"]) > 4096:
                 raise WebError("Enter the full path to an existing local video.")
             self._json(self.service.register_source(data["path"]), 201)
@@ -247,12 +271,16 @@ class ClipForgeHandler(BaseHTTPRequestHandler):
             self._json(self.service.enqueue_clip(data), 202)
         elif match := re.fullmatch(rf"/api/jobs/({ENTITY})/delete", path):
             self._json(self.service.delete_job(match[1], data))
+        elif match := re.fullmatch(rf"/api/jobs/({ENTITY})/cancel", path):
+            self._json(self.service.cancel_job(match[1], data), 202)
         elif match := re.fullmatch(rf"/api/jobs/({ENTITY})/retry", path):
             if data:
                 raise WebError("Retry does not accept additional options.")
             self._json(self.service.retry(match[1]), 202)
         elif match := re.fullmatch(rf"/api/clips/({ENTITY})/approve", path):
             self._json(self.service.approve(match[1], data))
+        elif match := re.fullmatch(rf"/api/clips/({ENTITY})/delete", path):
+            self._json(self.service.delete_clip(match[1], data))
         elif match := re.fullmatch(rf"/api/clips/({ENTITY})/publish", path):
             self._json(self.service.publish(match[1], data), 202)
         elif match := re.fullmatch(rf"/api/clips/({ENTITY})/resume", path):

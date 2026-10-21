@@ -11,6 +11,7 @@ from pathlib import Path
 from .captions import CAPTION_VERSION, write_captions
 from .common import (Candidate, Settings, SourceManifest, Transcript, atomic_json,
                      run_command, sha256_file, stable_id)
+from .job_control import checkpoint, controlled, ffmpeg_progress, report
 
 RENDER_VERSION = "3"
 
@@ -109,6 +110,7 @@ def _audio_graph(settings: Settings, duration: float, music: bool) -> str:
 def render_clip(settings: Settings, media_path: Path, transcript: Transcript,
                 candidate: Candidate, manifest: SourceManifest, out_dir: Path) -> dict:
     """Render only canonical cuts; a completed identical render is reused by hash."""
+    checkpoint()
     media_path, out_dir = media_path.resolve(), out_dir.resolve()
     start, end = _canonical_interval(transcript, candidate)
     # Only arithmetic on already exact canonical timestamps gets an ULP-scale
@@ -175,10 +177,18 @@ def render_clip(settings: Settings, media_path: Path, transcript: Transcript,
                  "-c:v", "libx264", "-preset", settings.render.preset, "-crf", str(settings.render.crf),
                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
                  "-ac", "2", "-movflags", "+faststart", "-map_metadata", "-1", "clip.mp4"]
-        run_command(args, cwd=stage)
+        report("rendering", 0.0, duration)
+        if controlled():
+            args[1:1] = ["-progress", "pipe:1", "-nostats"]
+            run_command(args, cwd=stage, on_stdout=ffmpeg_progress(duration))
+        else:
+            run_command(args, cwd=stage)
+        report("rendering", duration, duration)
         rendered = stage / "clip.mp4"
+        report("verifying")
         verify_output(settings, rendered, duration)
         digest = sha256_file(rendered)
+        checkpoint()
         for key, path in written.items():
             shutil.copyfile(path, paths[key])
         os.replace(rendered, output)

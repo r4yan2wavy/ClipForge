@@ -1,5 +1,23 @@
 # Validation record
 
+## Continuous animation and local voices, October 21, 2026
+
+All **343 tests and 135 subtests** passed on Windows / Python 3.12, including real Windows narration, installed Piper narration at three speeds, real FFmpeg encoding, deterministic seeking, pose/position/camera continuity at narration boundaries, persistent held props, safe cancellation, pinned voice download integrity, preview isolation and existing clipping/publication safeguards. The three JavaScript suites passed and pip reported no broken requirements. After bounding longer storyboards to six shots, the 44 relevant story-engine and voice-service checks passed again.
+
+The localhost voice library downloaded Alba medium through its normal button, verified the pinned files and exposed the new narrator. Its locally generated 5.20-second preview loaded without a media error. LJ and Norman medium were also installed; David and Zira remained available. No voice cloning, paid speech API or uploaded script was involved. The catalog includes model/dataset terms, source, attribution and download size, and local model weights remain excluded from source/release packaging.
+
+Using **Generate video** in the browser created **The Shadow That Lags**, a three-scene original story with 14 acting cues. Local Qwen wrote the storyboard, Alba narrated it with 28 measured phrase captions, and the new renderer exported a 50.5-second 720 × 1280 H.264/AAC MP4. The browser loaded and advanced playback without a media error; no console errors or warnings were present. This video exceeded its 30-second writing target, and the interface displayed the actual length warning. No test story was approved or published.
+
+The renderer uses connected, deterministic 2D rigs, controlled props, expressions and blended environments. It remains a minimalist stickman animation system, with a bounded vocabulary of actions and locations. The storyboard editor supports refining action timing; arbitrary cinematic scenes or precise dialogue lip synchronization are outside this upgrade.
+
+## AI Story Generator, October 21, 2026
+
+All **324 tests and 129 subtests** passed on Windows / Python 3.12, including real FFmpeg rendering, installed Windows narration, project persistence, scene editing, safe cancellation, batch queues, bounded local model responses, existing video clipping/imports, and publication safeguards. Both the existing Studio and new Story Generator JavaScript check suites passed; Python dependency checks reported no broken requirements.
+
+The complete real local pipeline used the configured Qwen3 model in Ollama, Windows desktop narration and FFmpeg. A 60-second writing target produced a **73.96-second, 720 × 1280 H.264/AAC video** with six scenes, 123 measured narration word marks, animated captions, consistent characters and original ambient audio. A second story started through the browser produced a **1080 × 1920 H.264/AAC video** with the Zira voice. Its 30-second writing target resulted in 20.93 seconds of narration, and the interface displayed the duration warning. Target durations are not guaranteed runtimes; complete narration is retained.
+
+The browser loaded and played the resulting video without media errors or console warnings, reopened a saved project, displayed the editable storyboard and exposed the existing review/export controls. No story was approved or published to a connected account during verification. Piper/eSpeak provider fallbacks were covered with fixtures; Windows David/Zira were exercised directly. The renderer uses procedural 2D art and CPU encoding; no diffusion enhancement was implemented or needed for these runs.
+
 ## Whisper audio repair, version 0.4.1
 
 Reproduced the user's crash with faster-whisper 1.2.1 and PyAV 19.0.1: `av.open()` rejected `metadata_errors` during audio decoding. Installing the AI extra now resolves PyAV 18.1.0. A real audio-decoder probe runs in Settings and before transcription. Unexpected worker failures retain the processing stage and safe stack locations in local diagnostic events; the UI no longer describes every processing exception as missing prerequisites.

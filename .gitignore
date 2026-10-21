@@ -12,6 +12,8 @@ prepared/
 /models/
 /build/
 /dist/
+/work/
+/client_secret*.json
 .env
 .env.*
 !.env.example

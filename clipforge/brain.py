@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from .common import (Candidate, CandidateList, Metadata, Settings, Span, Transcript,
                      Word, atomic_json, run_command, sha256_file, stable_id)
+from .job_control import checkpoint, report
 
 PROMPT_VERSION = "1"
 PROMPT_DIR = Path(__file__).with_name("prompts")
@@ -108,6 +109,7 @@ def extract_audio(settings: Settings, media_path: Path, destination: Path):
 def transcribe(settings: Settings, media_path: Path, source_sha: str,
                duration: float, supplied: Path | None = None,
                model_digest: str | None = None) -> Transcript:
+    report("transcribing", 0.0, duration)
     speech = settings.speech
     if not supplied and model_digest is None:
         model_digest = speech_model_digest(settings)
@@ -116,7 +118,9 @@ def transcribe(settings: Settings, media_path: Path, source_sha: str,
                      "provided": sha256_file(supplied) if supplied else None})
     cache = settings.resolve(settings.paths.cache) / "transcripts" / f"{key}.json"
     if cache.exists():
-        return Transcript.model_validate_json(cache.read_text(encoding="utf-8"))
+        result = Transcript.model_validate_json(cache.read_text(encoding="utf-8"))
+        report("transcribing", duration, duration)
+        return result
     if supplied:
         if supplied.suffix.lower() == ".srt":
             result = load_subtitles(supplied, duration, speech.language or "und")
@@ -133,26 +137,34 @@ def transcribe(settings: Settings, media_path: Path, source_sha: str,
         from faster_whisper import WhisperModel
         audio = cache.with_suffix(".wav")
         audio.parent.mkdir(parents=True, exist_ok=True)
-        extract_audio(settings, media_path, audio)
         model = None
         try:
+            extract_audio(settings, media_path, audio)
+            checkpoint()
             model = WhisperModel(str(model_dir), device=speech.device, compute_type=speech.compute_type,
                                  cpu_threads=speech.cpu_threads, local_files_only=True)
+            checkpoint()
             segments, info = model.transcribe(str(audio), language=speech.language,
                                               beam_size=speech.beam_size, vad_filter=True,
                                               word_timestamps=True, condition_on_previous_text=False)
             # Consume the generator before unloading. faster-whisper maps VAD times back
             # to the original audio; the extracted WAV was never silence-trimmed.
-            words = [Word(start_s=float(w.start), end_s=float(w.end), text=w.word)
-                     for segment in segments for w in (segment.words or [])
-                     if w.end > w.start and w.word.strip()]
+            words = []
+            for segment in segments:
+                checkpoint()
+                words.extend(Word(start_s=float(w.start), end_s=float(w.end), text=w.word)
+                             for w in (segment.words or []) if w.end > w.start and w.word.strip())
+                # faster-whisper maps VAD output back to source presentation time.
+                report("transcribing", max(0.0, min(duration, float(segment.end))), duration)
             result = Transcript(language=info.language, words=words, spans=spans_from_words(words),
                                 duration_s=duration, version="whisper-1:" + model_digest)
         finally:
             del model
             gc.collect()
             audio.unlink(missing_ok=True)
+    checkpoint()
     atomic_json(cache, result.model_dump())
+    report("transcribing", duration, duration)
     return result
 
 
@@ -212,12 +224,14 @@ def transcript_windows(transcript: Transcript, settings: Settings) -> list[list[
 
 class LocalLLM:
     def __init__(self, settings: Settings):
+        checkpoint()
         self.settings = settings
         self.http = requests.Session()
         self.http.trust_env = False  # No environment proxy can receive transcripts.
         self.base = settings.brain.ollama_url.rstrip("/")
         response = self.http.post(self.base + "/api/show", json={"model": settings.brain.model},
                                   timeout=15, allow_redirects=False)
+        checkpoint()
         if response.status_code != 200:
             raise ReviewRequired("local Ollama model unavailable")
         show = response.json()
@@ -225,6 +239,7 @@ class LocalLLM:
                 show.get("details", {}).get("format") != "gguf" or not show.get("model_info")):
             raise ReviewRequired("refusing model without local GGUF weights")
         tags = self.http.get(self.base + "/api/tags", timeout=15, allow_redirects=False)
+        checkpoint()
         tags.raise_for_status()
         self.digest = next((m["digest"] for m in tags.json().get("models", [])
                             if m.get("name") == settings.brain.model), None)
@@ -235,12 +250,14 @@ class LocalLLM:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(data, ensure_ascii=False)}]
         for attempt in range(self.settings.brain.correction_retries + 1):
+            checkpoint()
             response = self.http.post(self.base + "/api/chat", json={
                 "model": self.settings.brain.model, "messages": messages, "stream": False,
                 "format": contract.model_json_schema(), "think": False, "keep_alive": 0,
                 "options": {"temperature": 0, "num_ctx": self.settings.brain.context_tokens,
                             "num_predict": 1800}}, timeout=self.settings.brain.timeout_s,
                 allow_redirects=False)
+            checkpoint()
             if response.status_code != 200:
                 raise ReviewRequired("local Ollama request failed")
             try:
@@ -262,14 +279,20 @@ class LocalLLM:
 
 def select_clips(settings: Settings, transcript: Transcript, llm: LocalLLM | None,
                  supplied: Path | None = None) -> list[Candidate]:
+    checkpoint()
     if supplied:
+        report("selecting", 0, 1)
         candidates = validate_candidates(CandidateList.model_validate_json(supplied.read_text(encoding="utf-8")),
                                          transcript, settings)
+        report("selecting", 1, 1)
     else:
         if llm is None:
             raise ReviewRequired("local LLM required for automatic selection")
         candidates = []
-        for window in transcript_windows(transcript, settings):
+        windows = transcript_windows(transcript, settings)
+        report("selecting", 0, len(windows))
+        for index, window in enumerate(windows):
+            checkpoint()
             allowed = {s.id for s in window}
             result = llm.structured(prompt("selection"), {
                 "editing_min_seconds": settings.brain.min_clip_s,
@@ -277,6 +300,7 @@ def select_clips(settings: Settings, transcript: Transcript, llm: LocalLLM | Non
                 "spans": [s.model_dump() for s in window]}, CandidateList,
                 lambda x: validate_candidates(x, transcript, settings, allowed))
             candidates.extend(validate_candidates(result, transcript, settings, allowed))
+            report("selecting", index + 1, len(windows))
     # Global editorial estimate ordering, overlap suppression across windows.
     chosen = []
     for item in sorted(candidates, key=lambda c: (-c.score, c.start_s)):
@@ -295,6 +319,7 @@ def clip_text(transcript: Transcript, candidate: Candidate) -> str:
 
 def generate_metadata(settings: Settings, transcript: Transcript, candidate: Candidate,
                       llm: LocalLLM | None, supplied: Path | None = None) -> Metadata:
+    report("metadata")
     if supplied:
         return Metadata.model_validate_json(supplied.read_text(encoding="utf-8"))
     if llm is None:

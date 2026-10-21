@@ -5,6 +5,8 @@ import json
 import logging
 import logging.handlers
 import os
+import re
+import shutil
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -19,6 +21,7 @@ from .brain import (LocalLLM, ReviewRequired, generate_metadata, prompt, select_
                     speech_model_digest, transcribe)
 from .common import (DB, Metadata, Settings, SourceManifest, atomic_json, iso_now,
                      load_settings, run_command, sha256_file, stable_id, utcnow)
+from .job_control import JobCancelled, checkpoint, report
 
 log = logging.getLogger("clipforge")
 
@@ -59,10 +62,13 @@ def select_music(settings: Settings, manifest: SourceManifest, source_sha: str) 
 
 def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False) -> dict:
     stage = "preparing"
+    folder = None
+    new_folder = False
     job_id = stable_id(str(path.resolve()))
     db.conn.execute("INSERT OR IGNORE INTO jobs(id,manifest_path,state,updated_at) VALUES(?,?,?,?)",
                     (job_id, str(path.resolve()), "NEW", iso_now()))
     try:
+        report("preparing")
         manifest = SourceManifest.model_validate_json(path.read_text(encoding="utf-8"))
         if manifest.schedule:
             from .upload import validate_schedule
@@ -97,6 +103,12 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
         previous = db.conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         same = previous["input_hash"] == input_hash
         existing = db.conn.execute("SELECT * FROM artifacts WHERE job_id=? AND active=1", (job_id,)).fetchall()
+        has_deleted = bool(db.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='web_deleted_clips'").fetchone())
+        if same and not existing and has_deleted and db.conn.execute(
+                "SELECT 1 FROM artifacts a JOIN web_deleted_clips d ON d.clip_id=a.clip_id WHERE a.job_id=? LIMIT 1",
+                (job_id,)).fetchone() and not retry:
+            db.set_job(job_id, "NO_CANDIDATES")
+            return {"job_id": job_id, "state": "NO_CANDIDATES", "artifacts": [], "deleted_clips": True}
         if same and not retry:
             if previous["state"] in ("PREPARED", "REVIEW_REQUIRED", "NO_CANDIDATES"):
                 if not existing or all(_artifact_intact(Path(a["artifact_dir"]), a["render_sha256"]) for a in existing):
@@ -116,10 +128,12 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
                         (input_hash, attempts, iso_now(), job_id))
         duration = probe_source(settings, media)
         stage = "transcribing"
+        report(stage, 0.0, duration)
         transcript = transcribe(settings, media, source_sha, duration,
                                 settings.resolve(manifest.transcript_path) if manifest.transcript_path else None,
                                 model_digest=speech_digest)
         stage = "selecting"
+        report(stage)
         db.set_job(job_id, "SELECTING")
         clips = select_clips(settings, transcript, llm,
                              settings.resolve(manifest.candidates_path) if manifest.candidates_path else None)
@@ -128,8 +142,9 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
             db.set_job(job_id, "NO_CANDIDATES")
             return {"job_id": job_id, "state": "NO_CANDIDATES", "artifacts": []}
         from .factory import render_clip
-        dirs, current_ids, review, frozen = [], set(), False, False
+        dirs, current_ids, review, frozen, skipped_deleted = [], set(), False, False, False
         for candidate in clips:
+            checkpoint()
             versions = {"engine": __version__, "edit": RENDER_VERSION, "captions": CAPTION_VERSION, "transcript": transcript.version,
                         "encoder": encoder_version,
                         "model": settings.brain.model if llm else "manual", "model_digest": model_digest,
@@ -139,7 +154,11 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
                                  "transcript": stable_id(transcript.model_dump()), "versions": versions,
                                  "render": settings.render.model_dump(), "framing": manifest.framing,
                                  "music": supplied_hashes.get("music_path")})
+            if has_deleted and db.conn.execute("SELECT 1 FROM web_deleted_clips WHERE clip_id=?", (clip_id,)).fetchone():
+                skipped_deleted = True
+                continue
             folder = settings.resolve(settings.paths.prepared) / clip_id
+            new_folder = not db.conn.execute("SELECT 1 FROM artifacts WHERE clip_id=?", (clip_id,)).fetchone()
             submitted = None
             if db.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='publications'").fetchone():
                 submitted = db.conn.execute("SELECT * FROM publications WHERE clip_id=?", (clip_id,)).fetchone()
@@ -148,6 +167,7 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
                 if social:
                     submitted = {"render_sha256": social["video_sha256"]}
             if submitted:
+                new_folder = False
                 # Render identity excludes credits/schedule/approval metadata. Never
                 # replace the exact artifact snapshot an existing intention refers to.
                 if not _artifact_intact(folder, submitted["render_sha256"]):
@@ -159,9 +179,11 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
                 frozen = True
                 continue
             stage = "rendering"
+            report(stage, 0.0, candidate.end_s - candidate.start_s)
             db.set_job(job_id, "RENDERING")
             rendered = render_clip(settings, media, transcript, candidate, manifest, folder)
             stage = "metadata"
+            report(stage)
             metadata = append_credits(generate_metadata(settings, transcript, candidate, llm,
                                       settings.resolve(manifest.metadata_path) if manifest.metadata_path else None), manifest)
             approved = manifest.model_copy(deep=True)
@@ -176,6 +198,9 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
                         "candidate": candidate.model_dump(), "versions": versions,
                         "metadata": metadata.model_dump(), "source_manifest": approved.model_dump(),
                         "state": "REVIEW_REQUIRED" if needs_review else "PREPARED", "created_at": iso_now()}
+            # Finish the files and database association together once this
+            # checkpoint passes. A later cancellation keeps this complete clip.
+            checkpoint()
             atomic_json(folder / "artifact.json", artifact)
             atomic_json(folder / "transcript.json", transcript.model_dump())
             atomic_json(folder / "metadata.json", metadata.model_dump())
@@ -183,10 +208,26 @@ def prepare_manifest(settings: Settings, db: DB, path: Path, retry: bool = False
                             (clip_id, job_id, str(folder), rendered["render_sha256"], iso_now()))
             dirs.append(str(folder))
             current_ids.add(clip_id)
+            new_folder = False
+        checkpoint()
         retire_artifacts(db, job_id, current_ids)
+        if not dirs and skipped_deleted:
+            db.set_job(job_id, "NO_CANDIDATES")
+            return {"job_id": job_id, "state": "NO_CANDIDATES", "artifacts": [], "deleted_clips": True}
         state = "REVIEW_REQUIRED" if review else "PREPARED"
         db.set_job(job_id, state, "submitted_inputs_frozen" if frozen else None)
         return {"job_id": job_id, "state": state, "artifacts": dirs}
+    except JobCancelled:
+        # Only delete an unregistered generated output directory. Finished or
+        # submitted clips have database records and survive cancellation.
+        prepared = settings.resolve(settings.paths.prepared).resolve()
+        if (new_folder and folder is not None and folder.parent.resolve() == prepared
+                and re.fullmatch(r"[0-9a-f]{64}", folder.name) and not folder.is_symlink()
+                and not (getattr(folder, "is_junction", lambda: False)())
+                and not db.conn.execute("SELECT 1 FROM artifacts WHERE artifact_dir=?", (str(folder),)).fetchone()):
+            shutil.rmtree(folder, ignore_errors=True)
+        db.set_job(job_id, "CANCELLED")
+        raise
     except ReviewRequired as error:
         db.set_job(job_id, "REVIEW_REQUIRED", str(error))
         log.warning("Job %s requires review: %s", job_id[:12], str(error))
@@ -236,6 +277,7 @@ def _artifact_intact(folder: Path, checksum: str) -> bool:
 
 
 def verify_artifact(settings: Settings, folder: Path) -> dict:
+    checkpoint()
     artifact = json.loads((folder / "artifact.json").read_text(encoding="utf-8"))
     video = Path(artifact["video_path"])
     if not _artifact_intact(folder, artifact["render_sha256"]):

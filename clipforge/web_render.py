@@ -13,6 +13,7 @@ from typing import Callable
 from .captions import Caption, _plain, ass_text, srt_text
 from .common import Settings, atomic_json, run_command, sha256_file
 from .factory import _video_graph, probe_media, verify_output
+from .job_control import checkpoint, controlled, ffmpeg_progress, report
 
 MANUAL_RENDER_VERSION = "2"
 
@@ -26,6 +27,7 @@ def render_manual(settings: Settings, media: Path, out_dir: Path, *, start_s: fl
     A silent audio stream is added to video-only recordings for MP4 compatibility.
     """
     def stage(name: str):
+        report(name)
         if on_stage:
             on_stage(name)
 
@@ -108,10 +110,17 @@ def render_manual(settings: Settings, media: Path, out_dir: Path, *, start_s: fl
                  "-b:a", "128k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart",
                  "-map_metadata", "-1", "clip.mp4"]
         stage("rendering")
-        run_command(args, cwd=temporary)
+        report("rendering", 0.0, duration)
+        if controlled():
+            args[1:1] = ["-progress", "pipe:1", "-nostats"]
+            run_command(args, cwd=temporary, on_stdout=ffmpeg_progress(duration))
+        else:
+            run_command(args, cwd=temporary)
+        report("rendering", duration, duration)
         stage("verifying")
         verify_output(settings, temporary / "clip.mp4", duration)
         digest = sha256_file(temporary / "clip.mp4")
+        checkpoint()
         os.replace(temporary / "clip.mp4", output)
         for key, path in paths.items():
             if text:

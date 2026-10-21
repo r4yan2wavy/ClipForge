@@ -40,10 +40,20 @@ The server binds to `127.0.0.1`, so the app is available on this computer. Keep 
 2. Open **Studio** and add a video. Browser upload copies a file into ClipForge's workspace. Importing an existing local file by its full path registers that file in place; keep it at that path while it is in use. The link option downloads eligible direct HTTPS media or public YouTube/Twitch/Kick videos, or saves a platform reference awaiting your authorized original. **Try a sample** registers the included synthetic test pattern and tones.
 3. Choose **Pick a moment** for manual mode, enter a title, and set a start and end inside the source. A manual cut can be 1–180 seconds. Confirm you own the recording or have permission to edit it, and complete its rights/credit information.
 4. Choose framing: **center crop** fills the vertical frame and trims the sides; **fit** preserves the whole image with padding; **blur** fits the image over a blurred background. Optional manual text is a static overlay for the entire cut. It does not listen to the audio or generate timed subtitles.
-5. Render the clip. The job list shows its current processing stage. Progress follows stages; it is not a precise FFmpeg percentage.
+5. Render the clip. The job list shows its current processing stage, elapsed time and an approximate time left in that step when measurements or comparable past jobs support an estimate. A measured percentage refers to the current step, rather than the whole job.
 6. In **Clips**, watch the render, edit its title, description and tags, confirm your review, and download the MP4. Review the cut's meaning, framing, captions and credits before publishing it anywhere.
 
 Manual mode performs a real local render. It does not run speech recognition or a model. The sample is already synthetic media and is blocked from platform publication through this app.
+
+## Organize clips and control jobs
+
+The collection has **Search clips**, review-status filtering and sorting by newest, oldest, title or shortest length. Each clip card and review panel has **Delete clip**. Confirming permanently removes the clip's generated video, captions and local editing files from ClipForge's workspace. Its source video, separately downloaded copies and posts already uploaded to a social platform remain. Deletion is blocked while work owns the workspace or a saved unfinished upload still needs its files; resolve that upload first.
+
+Downloads and clip-generation jobs have a **Cancel** action. Confirm to remove a queued task or request that the running worker stop and clean up temporary files. Cancellation can take time while a local model finishes its current operation. Existing completed clips and source videos remain. Retry a cancelled clip from its workshop row; retry a cancelled download from **Linked videos**. Publication and authorization actions use their existing review/recovery controls.
+
+Time estimates belong to **the current step**, so a remaining-time estimate can change when ClipForge moves from speech transcription to finding moments or rendering. Estimates use measured progress or comparable previous jobs. Early in a job, while a model loads, during a stalled download, or without reliable size information, the app displays **Estimating time…**. It never treats a fixed stage marker as an exact percentage. Internet speed, CPU/GPU settings, model size and concurrent activity can change the remaining time.
+
+In **Settings → Video tools**, choose a **Caption size preset** or enter a custom size, then save settings. The size applies to future rendered clips; existing videos keep their saved captions.
 
 ## Add a link
 
@@ -106,6 +116,8 @@ Downloading a clip needs no Google account. Publishing from ClipForge requires y
 Install the extra with `.venv\Scripts\python.exe -m pip install -e ".[youtube]"` on Windows, or `.venv/bin/python -m pip install -e '.[youtube]'` on macOS/Linux. Restart ClipForge afterward.
 
 In **Settings**, configure the Desktop OAuth file path, exact target channel, desired privacy, and enable uploads. Authorize through Google's normal browser consent. In a reviewed clip's publication form, confirm the audience, synthetic-media disclosure, target/privacy and any future schedule before submitting. Scheduled videos need private status and the configured minimum lead time. No clip is published merely by rendering it or enabling the setting.
+
+Use the collection's **Upload to YouTube** shortcut for an approved clip, or **Review for YouTube** for a clip awaiting review. The upload form lets you choose **Publish automatically at**: ClipForge uploads the approved video first, and YouTube handles its scheduled public release after processing. Keep ClipForge running until the upload is accepted; it does not have to remain open for YouTube's later scheduled release. A saved publication's status remains separate from local clip deletion.
 
 Submitted clips are kept immutable so a retry cannot silently change an existing upload intention. Check the reported publication state before retrying or attempting another upload. Reconciliation states require the review described in the upload guide. Revoking authorization deletes local owner API data and attempts to revoke consent; it does not delete videos from YouTube.
 

@@ -16,6 +16,10 @@ separately; they are not bundled in this repository.
 | FileLock | Local process lock | [Upstream license](https://github.com/tox-dev/filelock/blob/main/LICENSE) |
 | tzdata | Timezone data | [Upstream license information](https://github.com/python/tzdata/blob/main/LICENSE) |
 | FFmpeg / ffprobe | Media processing | [Licensing and build considerations](https://ffmpeg.org/legal.html) |
+| Pillow | Optional local procedural story animation | [Upstream license](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
+| Windows speech voices | Optional offline story narration, supplied by Windows | Terms supplied with your Windows installation and installed voice |
+| Piper / eSpeak | Optional separately installed offline narrators | Terms supplied with the exact executable and voice model you install; no voice weights are bundled |
+| Piper TTS (`voices` extra) | Optional local neural speech engine, invoked as a separate local process | [OHF-Voice Piper GPL-3.0 license](https://github.com/OHF-Voice/piper1-gpl/blob/main/LICENSE.md); installed separately through pip, not relicensed by ClipForge |
 | faster-whisper | Transcription | [Upstream license](https://github.com/SYSTRAN/faster-whisper/blob/master/LICENSE) |
 | Whisper | Speech-model family | [Upstream license](https://github.com/openai/whisper/blob/main/LICENSE) |
 | Ollama | Local model server | [Upstream license](https://github.com/ollama/ollama/blob/main/LICENSE) |
@@ -47,3 +51,26 @@ rights still apply.
 The `demo/` preview contains a generated test pattern, tones and synthetic
 caption fixtures. It contains no creator footage, downloaded song or model
 weights. Its purpose and production method are documented in `demo/README.md`.
+
+Story backgrounds, vector characters, ambient tones and sound effects are created
+procedurally by ClipForge. No downloaded soundtrack, character art, voice weights
+or generated-image service is bundled with the Story Generator. Narrator and
+model licenses remain those of the separately installed voice and local model.
+
+The optional local narrator catalog offers pinned files from
+[Rhasspy's Piper voice repository](https://huggingface.co/rhasspy/piper-voices/tree/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd).
+That repository identifies MIT licensing, while each upstream model card also
+describes its training dataset's terms. ClipForge retains the exact model card,
+source revision, hashes, and attribution in `models/piper/` when a user installs a
+pack. Those local model files are excluded from repository/release packaging.
+
+| Catalog pack | Upstream dataset terms and attribution |
+|---|---|
+| LJSpeech medium | Public-domain LJ Speech dataset; voice trained from scratch by Bryce Beattie. [Model card](https://huggingface.co/rhasspy/piper-voices/blob/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/en/en_US/ljspeech/medium/MODEL_CARD) |
+| Norman medium | Public-domain LibriVox recordings; voice trained from scratch by Bryce Beattie. [Model card](https://huggingface.co/rhasspy/piper-voices/blob/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/en/en_US/norman/medium/MODEL_CARD) |
+| Joe medium | CC0 OHF-Voice dataset; Michael Hansen/Rhasspy contributors, fine-tuned from Lessac medium. [Model card](https://huggingface.co/rhasspy/piper-voices/blob/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/en/en_US/joe/medium/MODEL_CARD) |
+| Alba medium | University of Edinburgh dataset record 10283/3270, CC BY 4.0; Michael Hansen/Rhasspy contributors, fine-tuned from Lessac medium. Retain the dataset attribution and upstream card. [Model card](https://huggingface.co/rhasspy/piper-voices/blob/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/en/en_GB/alba/medium/MODEL_CARD) |
+
+The catalog does not offer voice cloning or require a paid speech service.
+Installed Windows voices remain governed by their Windows/voice-provider terms;
+only voices returned by the local desktop speech API are presented as compatible.
